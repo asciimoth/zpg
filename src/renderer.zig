@@ -113,15 +113,15 @@ const Frame = struct {
         var suffix_buffer: [96]u8 = undefined;
         var suffix = std.Io.Writer.fixed(&suffix_buffer);
         try counter(&suffix, completed, total, self.tick, self.style);
-        var line_buffer: [1024]u8 = undefined;
+        var line_buffer: [2048]u8 = undefined;
         var line = std.Io.Writer.fixed(&line_buffer);
         if (depth != 0) {
             for (0..depth - 1) |ancestor| {
-                try line.writeAll(if (self.branches[ancestor]) "|  " else "   ");
+                try line.writeAll(if (self.branches[ancestor]) "│  " else "   ");
             }
-            try line.writeAll(if (self.snapshot.hasSibling(index)) "+- " else "`- ");
+            try line.writeAll(if (self.snapshot.hasSibling(index)) "├─ " else "└─ ");
         }
-        const name_width = @max(8, self.width -| (line.end + styles.text_width(suffix.buffered())));
+        const name_width = @max(8, self.width -| (styles.text_width(line.buffered()) + styles.text_width(suffix.buffered())));
         try clipped(&line, name, name_width);
         try line.writeAll(suffix.buffered());
         if (self.lines != 0) try self.writer.writeAll("\r\n");
@@ -277,7 +277,19 @@ test "tree follows parents even when children precede them" {
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectEqual(@as(usize, 4), try render(&writer, snapshot, 80, 24, 0, .{}));
     try std.testing.expectEqualStrings(
-        "root |\r\n+- first |\r\n`- second |\r\n   `- leaf |",
+        "root |\r\n├─ first |\r\n└─ second |\r\n   └─ leaf |",
+        writer.buffered(),
+    );
+}
+
+test "tree continuation branches use terminal cell widths" {
+    var packet: [1024]u8 = undefined;
+    const snapshot = try Snapshot.init(testPacket(&packet, &.{ 255, 0, 1, 0 }, &.{ "root", "first", "long leaf keys", "last" }));
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    _ = try render(&writer, snapshot, 22, 24, 0, .{});
+    try std.testing.expectEqualStrings(
+        "root |\r\n├─ first |\r\n│  └─ long leaf key |\r\n└─ last |",
         writer.buffered(),
     );
 }
@@ -290,7 +302,10 @@ test "small terminals and unsafe names stay within bounds" {
     try std.testing.expectEqual(@as(usize, 2), try render(&writer, snapshot, 10, 4, 0, .{}));
     try std.testing.expect(std.mem.findScalar(u8, writer.buffered(), 27) == null);
     var lines = std.mem.splitSequence(u8, writer.buffered(), "\r\n");
-    while (lines.next()) |line| try std.testing.expect(line.len <= 9);
+    while (lines.next()) |line| {
+        try std.testing.expect(std.unicode.utf8ValidateSlice(line));
+        try std.testing.expect(styles.text_width(line) <= 9);
+    }
     writer.end = 0;
     try std.testing.expectEqual(@as(usize, 0), try render(&writer, snapshot, 1, 1, 0, .{}));
     try std.testing.expectEqual(@as(usize, 0), writer.end);

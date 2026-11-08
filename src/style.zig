@@ -78,7 +78,7 @@ fn validate(text: []const u8) !usize {
 // Keep the renderer's conservative two-cell estimate for other non-ASCII codepoints.
 pub fn cell_width(codepoint: u21) usize {
     return if (codepoint < 128 or
-        (codepoint >= 0x2580 and codepoint <= 0x259f) or
+        (codepoint >= 0x2500 and codepoint <= 0x259f) or
         (codepoint >= 0x2800 and codepoint <= 0x28ff) or
         (codepoint >= 0xee00 and codepoint <= 0xee0b)) 1 else 2;
 }

@@ -36,9 +36,9 @@ and a completed count when available. For example:
 
 ```text
 build [#########---] 75% 3/4
-+- assets [############] 100% 2/2
-`- code [######------] 50% 1/2
-   `- compile /
+├─ assets [############] 100% 2/2
+└─ code [######------] 50% 1/2
+   └─ compile /
 ```
 
 Bars stop at 100% if the completed count exceeds the estimate. The item count
