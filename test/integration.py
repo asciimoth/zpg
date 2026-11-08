@@ -36,8 +36,10 @@ for args in [(), ('--bad',), ('--name',), ('--mock', 'true'),
              ('--bar-style',), ('--spinner-style',),
              ('--bar-style', 'bad', 'true'),
              ('--bar-style', '#\n', 'true'),
+             ('--bar-style', '#\u202e', 'true'),
              ('--spinner-style', '', 'true'),
-             ('--spinner-style', '\x1b[2J', 'true')]:
+             ('--spinner-style', '\x1b[2J', 'true'),
+             ('--spinner-style', '\u2066', 'true')]:
     run(*args, code=2)
 assert b'Usage:' in run('--help')
 # A report is silent without a supervisor, including redirected scripts.
@@ -78,6 +80,8 @@ run('zpg-command-that-does-not-exist', code=1)
 log = worker('args', '--flag', 'a b', '', '$(false)')
 assert b"['--flag', 'a b', '', '$(false)']" in log
 assert b"stdin=''" in log and b'tty=(False, False)' in log
+assert run('--', sys.executable, fixture, 'args', '--help') == run(
+    sys.executable, fixture, 'args', '--help')
 # Neither pipe may gain labels, newlines, or a final status message.
 payload = b'first\n\nlast\r\x1b[31m\x00' + bytes(range(256)) + b'x' * 20000
 for fd in ('1', '2'):
@@ -334,7 +338,8 @@ assert any(b'[#########---] 75% 3/4' in frame for frame in frames)
 assert any(b'[############] 100% 7/4' in frame for frame in frames)
 spinner_frames = set(re.findall(rb'unknown ([|/\\-]) 2 done', capture))
 assert len(spinner_frames) > 1, spinner_frames
-assert b'unsafe?[2J label' in capture and b'\x1b[2J' not in capture
+assert b'unsafe?[2J label?' in capture
+assert b'\x1b[2J' not in capture and '\u202e'.encode() not in capture
 # Removing whole drawing transactions must leave the original log bytes.
 logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
 assert logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')

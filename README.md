@@ -20,7 +20,8 @@ zig build
 Use `zpg [options] <command> [args...]`.
 The name sets the progress node label and defaults to the command's basename.
 Flags after the
-command go to the child unchanged.
+command go to the child unchanged. Use `--` before a command name that starts
+with a hyphen.
 Commands use normal PATH lookup; no shell is started. Use `--help` for usage.
 
 Child stdin is closed. Child stdout and stderr are separate pipes, so the child
@@ -76,8 +77,8 @@ build [#########---] 75% 3/4
 
 Bars stop at 100% if the completed count exceeds the estimate. The item count
 still shows the reported value. Labels and tree depth are clipped to fit the
-terminal. Control bytes in progress labels are replaced with `?`; child log
-bytes pass through unchanged.
+terminal. Control and Unicode format characters in progress labels are
+replaced with `?`; child log bytes pass through unchanged.
 
 Use `--renderer tree` for the standard Zig tree display. Use `just demo` to see
 the default renderer, or `./zig-out/bin/zpg --renderer tree --mock` for the
@@ -119,10 +120,10 @@ For a custom bar, supply two characters (filled, empty) or four characters
 (left border, filled, empty, right border). Bars have 12 positions. For a custom
 spinner, supply 1 to 64 characters in frame order. Each character must be one
 UTF-8 codepoint; combined characters and multi-character frames are not
-supported. Control characters are rejected. Quote values that contain spaces
-or shell symbols. Block, braille, and Fira Code progress characters use one
-column; other non-ASCII characters use a conservative two-column estimate
-and can be clipped early.
+supported. Control and Unicode format characters are rejected. Quote values
+that contain spaces or shell symbols. Block, braille, and Fira Code progress
+characters use one column; other non-ASCII characters use a conservative
+two-column estimate and can be clipped early.
 
 Styles apply to the `bars` renderer, including `--mock`. The standard `tree`
 renderer keeps its own style. For nested commands, set the style on the

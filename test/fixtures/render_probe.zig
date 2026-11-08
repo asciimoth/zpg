@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     const unknown = root.start("unknown", 0);
     defer unknown.end();
     unknown.setCompletedItems(2);
-    const leaf = unknown.start("unsafe\x1b[2J label", 10);
+    const leaf = unknown.start("unsafe\x1b[2J label\u{202e}", 10);
     defer leaf.end();
     leaf.setCompletedItems(5);
     for (0..12) |_| try std.Io.File.stdout().writeStreamingAll(io, "log line\n");

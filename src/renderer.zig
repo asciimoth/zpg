@@ -55,9 +55,9 @@ fn clipped(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
             std.unicode.utf8Decode(text[index..end]) catch 0
         else
             0;
-        if (codepoint < 160) {
+        if (!styles.safe_codepoint(codepoint)) {
             try writer.writeByte('?');
-            index += 1;
+            index += if (codepoint == 0) 1 else len;
             cells += 1;
         } else {
             const cell_width = styles.cell_width(codepoint);
@@ -332,4 +332,7 @@ test "Unicode names remain whole and invalid bytes are replaced" {
     writer.end = 0;
     try clipped(&writer, "short\xe2\x82", 80);
     try std.testing.expectEqualStrings("short??", writer.buffered());
+    writer.end = 0;
+    try clipped(&writer, "safe\u{202e}label\u{2066}\u{200b}", 80);
+    try std.testing.expectEqualStrings("safe?label??", writer.buffered());
 }

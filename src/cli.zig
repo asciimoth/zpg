@@ -31,6 +31,7 @@ pub const usage =
     \\                              One to 64 characters, one per frame
     \\  --no-progress               Disable progress display
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
+    \\  --                        End options before a command starting with '-'
     \\
     \\Styles apply only to the bars renderer and default to ascii.
     \\UNICODE_PROGRESS_BAR=true defaults both styles to fira (Fira Code).
@@ -50,7 +51,10 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--name")) {
+        if (std.mem.eql(u8, a, "--")) {
+            o.argv = args[i + 1 ..];
+            break;
+        } else if (std.mem.eql(u8, a, "--name")) {
             i += 1;
             if (i == args.len) return error.MissingName;
             name = args[i];
@@ -174,4 +178,7 @@ test "leading flags and unchanged child arguments" {
     try std.testing.expectError(error.MissingCommand, parse(&.{}, null));
     try std.testing.expectError(error.UnknownFlag, parse(&.{"--bad"}, null));
     try std.testing.expectError(error.MissingName, parse(&.{"--name"}, null));
+    const dashed = try parse(&.{ "--", "-command", "--help" }, null);
+    try std.testing.expectEqualSlices([]const u8, &.{ "-command", "--help" }, dashed.argv);
+    try std.testing.expectError(error.MissingCommand, parse(&.{"--"}, null));
 }

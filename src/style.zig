@@ -67,11 +67,28 @@ fn validate(text: []const u8) !usize {
     var iterator = (try std.unicode.Utf8View.init(text)).iterator();
     var count: usize = 0;
     while (iterator.nextCodepoint()) |codepoint| {
-        if (codepoint < 32 or (codepoint >= 127 and codepoint < 160))
+        if (!safe_codepoint(codepoint))
             return error.ControlCharacter;
         count += 1;
     }
     return count;
+}
+
+// These characters can change the order, width, or visibility of terminal
+// text without occupying a normal cell. Do not accept them in style glyphs or
+// pass them through from child-controlled progress labels.
+pub fn safe_codepoint(cp: u21) bool {
+    if (cp < 32 or (cp >= 127 and cp < 160)) return false;
+    return switch (cp) {
+        0x00ad, 0x034f, 0x0600...0x0605, 0x061c, 0x06dd, 0x070f => false,
+        0x0890...0x0891, 0x08e2, 0x180e, 0x200b...0x200f => false,
+        0x2028...0x202e, 0x2060...0x206f, 0x3164 => false,
+        0xfe00...0xfe0f, 0xfeff, 0xfff9...0xfffb => false,
+        0x110bd, 0x110cd, 0x13430...0x1343f => false,
+        0x1bca0...0x1bca3, 0x1d173...0x1d17a => false,
+        0xe0000...0xe007f, 0xe0100...0xe01ef => false,
+        else => true,
+    };
 }
 
 // Block, braille, and Fira Code progress characters occupy one terminal cell.
@@ -127,10 +144,10 @@ test "Fira Code spinner cycles through six single-cell frames" {
 
 test "styles reject invalid UTF-8, controls, and invalid lengths" {
     const long: [65]u8 = @splat('x');
-    for ([_][]const u8{ "", "x", "abc", "abcde", "#\n", "\x1b-", "\xff-", "#\xc2\x85" }) |text| {
+    for ([_][]const u8{ "", "x", "abc", "abcde", "#\n", "\x1b-", "\xff-", "#\xc2\x85", "#\u{202e}", "#\u{200b}" }) |text| {
         try std.testing.expectError(error.InvalidBarStyle, Bar.parse(text));
     }
-    for ([_][]const u8{ "", "\n", "\x1b[2J", "\xff", "\xc2\x85", &long }) |text| {
+    for ([_][]const u8{ "", "\n", "\x1b[2J", "\xff", "\xc2\x85", "\u{2066}", "\u{fe0f}", &long }) |text| {
         try std.testing.expectError(error.InvalidSpinnerStyle, Spinner.parse(text));
     }
 }
