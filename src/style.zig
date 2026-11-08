@@ -10,10 +10,28 @@ pub const Bar = struct {
     filled: []const u8 = "#",
     empty: []const u8 = "-",
     right: []const u8 = "]",
+    caps: ?struct {
+        left_empty: []const u8,
+        left_filled: []const u8,
+        right_empty: []const u8,
+        right_filled: []const u8,
+    } = null,
 
     pub fn parse(text: []const u8) !Bar {
         if (std.mem.eql(u8, text, "ascii")) return .{};
         if (std.mem.eql(u8, text, "block")) return parse("█ ");
+        if (std.mem.eql(u8, text, "fira")) return .{
+            .left = "",
+            .filled = "\u{ee04}",
+            .empty = "\u{ee01}",
+            .right = "",
+            .caps = .{
+                .left_empty = "\u{ee00}",
+                .left_filled = "\u{ee03}",
+                .right_empty = "\u{ee02}",
+                .right_filled = "\u{ee05}",
+            },
+        };
         const count = validate(text) catch return error.InvalidBarStyle;
         if (count != 2 and count != 4) return error.InvalidBarStyle;
         var iterator = std.unicode.Utf8View.initUnchecked(text).iterator();
@@ -32,6 +50,7 @@ pub const Spinner = struct {
     pub fn parse(text: []const u8) !Spinner {
         if (std.mem.eql(u8, text, "ascii")) return .{};
         if (std.mem.eql(u8, text, "dots")) return parse("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+        if (std.mem.eql(u8, text, "fira")) return parse("\u{ee06}\u{ee07}\u{ee08}\u{ee09}\u{ee0a}\u{ee0b}");
         const count = validate(text) catch return error.InvalidSpinnerStyle;
         if (count == 0 or count > 64) return error.InvalidSpinnerStyle;
         return .{ .frames = text, .count = count };
@@ -55,12 +74,13 @@ fn validate(text: []const u8) !usize {
     return count;
 }
 
-// Block and braille characters occupy one terminal cell. Keep the renderer's
-// conservative two-cell estimate for other non-ASCII codepoints.
+// Block, braille, and Fira Code progress characters occupy one terminal cell.
+// Keep the renderer's conservative two-cell estimate for other non-ASCII codepoints.
 pub fn cell_width(codepoint: u21) usize {
     return if (codepoint < 128 or
         (codepoint >= 0x2580 and codepoint <= 0x259f) or
-        (codepoint >= 0x2800 and codepoint <= 0x28ff)) 1 else 2;
+        (codepoint >= 0x2800 and codepoint <= 0x28ff) or
+        (codepoint >= 0xee00 and codepoint <= 0xee0b)) 1 else 2;
 }
 
 pub fn text_width(text: []const u8) usize {
@@ -90,6 +110,19 @@ test "spinner frames use whole codepoints and wrap" {
     try std.testing.expectEqualStrings("⠋", spinner.frame(3));
     try std.testing.expectEqualStrings("⠙", (try Spinner.parse("dots")).frame(1));
     try std.testing.expectEqualStrings("x", (try Spinner.parse("x")).frame(100));
+}
+
+test "Fira Code spinner cycles through six single-cell frames" {
+    const spinner = try Spinner.parse("fira");
+    try std.testing.expectEqual(@as(usize, 6), spinner.count);
+    for (0..12) |tick| {
+        const frame = spinner.frame(tick);
+        try std.testing.expectEqual(@as(u21, @intCast(0xee06 + tick % 6)), try std.unicode.utf8Decode(frame));
+        try std.testing.expectEqual(@as(usize, 1), text_width(frame));
+    }
+    for (0xee00..0xee0c) |codepoint| {
+        try std.testing.expectEqual(@as(usize, 1), cell_width(@intCast(codepoint)));
+    }
 }
 
 test "styles reject invalid UTF-8, controls, and invalid lengths" {

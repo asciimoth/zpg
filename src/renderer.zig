@@ -79,8 +79,15 @@ fn counter(writer: *std.Io.Writer, completed: u32, total: u32, tick: usize, styl
         try writer.writeAll(style.bar.left);
         const value: u64 = @min(completed, total);
         const filled = value * bar_width / total;
-        for (0..filled) |_| try writer.writeAll(style.bar.filled);
-        for (0..bar_width - filled) |_| try writer.writeAll(style.bar.empty);
+        for (0..bar_width) |index| {
+            const is_filled = index < filled;
+            const glyph = if (style.bar.caps) |caps| blk: {
+                if (index == 0) break :blk if (is_filled) caps.left_filled else caps.left_empty;
+                if (index == bar_width - 1) break :blk if (is_filled) caps.right_filled else caps.right_empty;
+                break :blk if (is_filled) style.bar.filled else style.bar.empty;
+            } else if (is_filled) style.bar.filled else style.bar.empty;
+            try writer.writeAll(glyph);
+        }
         try writer.print("{s} {d}% {d}/{d}", .{ style.bar.right, value * 100 / total, completed, total });
     }
 }
@@ -195,6 +202,50 @@ test "custom counters retain counts, estimates, and spinner timing" {
     writer.end = 0;
     try counter(&writer, 1, 2, 0, .{ .bar = try styles.Bar.parse("(▓░)") });
     try std.testing.expectEqualStrings(" (▓▓▓▓▓▓░░░░░░) 50% 1/2", writer.buffered());
+}
+
+test "Fira Code bars fill end caps as part of the twelve positions" {
+    const style: styles.Style = .{ .bar = try styles.Bar.parse("fira") };
+    const cases = .{
+        .{ 0, " \u{ee00}" ++ "\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}" ++ "\u{ee02} 0% 0/12" },
+        .{ 1, " \u{ee03}" ++ "\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}" ++ "\u{ee02} 8% 1/12" },
+        .{ 6, " \u{ee03}" ++ "\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}" ++ "\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}" ++ "\u{ee02} 50% 6/12" },
+        .{ 11, " \u{ee03}" ++ "\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}" ++ "\u{ee02} 91% 11/12" },
+        .{ 12, " \u{ee03}" ++ "\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}" ++ "\u{ee05} 100% 12/12" },
+        .{ 15, " \u{ee03}" ++ "\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}" ++ "\u{ee05} 100% 15/12" },
+    };
+    inline for (cases) |case| {
+        var buffer: [96]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try counter(&writer, case[0], 12, 0, style);
+        try std.testing.expectEqualStrings(case[1], writer.buffered());
+    }
+}
+
+test "Fira Code bars and spinners fit terminal columns" {
+    var packet: [1024]u8 = undefined;
+    const bytes = testPacket(&packet, &.{255}, &.{"build"});
+    std.mem.writeInt(u32, bytes[1..5], 1, .little);
+    std.mem.writeInt(u32, bytes[5..9], 2, .little);
+    const snapshot = try Snapshot.init(bytes);
+    const style: styles.Style = .{
+        .bar = try styles.Bar.parse("fira"),
+        .spinner = try styles.Spinner.parse("fira"),
+    };
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    _ = try render(&writer, snapshot, 27, 24, 0, style);
+    try std.testing.expectEqualStrings("build \u{ee03}" ++ "\u{ee04}\u{ee04}\u{ee04}\u{ee04}\u{ee04}" ++ "\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee01}" ++ "\u{ee02} 50% 1/2", writer.buffered());
+    for (2..27) |cols| {
+        writer.end = 0;
+        _ = try render(&writer, snapshot, cols, 24, 0, style);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
+        try std.testing.expect(styles.text_width(writer.buffered()) < cols);
+    }
+    std.mem.writeInt(u32, bytes[5..9], 0, .little);
+    writer.end = 0;
+    _ = try render(&writer, snapshot, 16, 24, 5, style);
+    try std.testing.expectEqualStrings("build \u{ee0b} 1 done", writer.buffered());
 }
 
 test "Unicode styles fit by cells instead of bytes and clip whole codepoints" {

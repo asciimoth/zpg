@@ -55,6 +55,8 @@ Set bar and spinner styles with `--bar-style` and `--spinner-style`:
 
 ```sh
 ./zig-out/bin/zpg --bar-style block --spinner-style dots ./worker
+./zig-out/bin/zpg --bar-style fira --spinner-style fira ./worker
+UNICODE_PROGRESS_BAR=true ./zig-out/bin/zpg ./worker
 ./zig-out/bin/zpg --bar-style '█ ' --spinner-style '⠋⠙⠹⠸' --mock
 ./zig-out/bin/zpg --bar-style '(=.)' --spinner-style '.oO@' ./worker
 ```
@@ -67,13 +69,27 @@ braille characters. For example, a half-complete node with the block style is:
 build ██████       50% 1/2
 ```
 
+The `fira` presets use [Fira Code's dedicated progress characters][fira-progress].
+The bar has separate empty and filled characters for its left end, middle,
+and right end (U+EE00–U+EE05). Both ends are part of the 12 positions. The spinner
+cycles through six frames (U+EE06–U+EE0B). These characters require Fira Code or
+another terminal font that supports them.
+
+Set `UNICODE_PROGRESS_BAR=true` to make `fira` the default for both styles.
+Other values keep the `ascii` defaults. Each CLI style option overrides its
+own default. For example, `--bar-style ascii` keeps the Fira Code spinner,
+and `--bar-style ascii --spinner-style ascii` selects ASCII for both.
+
+[fira-progress]: https://github.com/tonsky/FiraCode#whats-in-the-box
+
 For a custom bar, supply two characters (filled, empty) or four characters
 (left border, filled, empty, right border). Bars have 12 positions. For a custom
 spinner, supply 1 to 64 characters in frame order. Each character must be one
 UTF-8 codepoint; combined characters and multi-character frames are not
 supported. Control characters are rejected. Quote values that contain spaces
-or shell symbols. Block and braille characters use one column; other non-ASCII
-characters use a conservative two-column estimate and can be clipped early.
+or shell symbols. Block, braille, and Fira Code progress characters use one
+column; other non-ASCII characters use a conservative two-column estimate
+and can be clipped early.
 
 Styles apply to the `bars` renderer, including `--mock`. The standard `tree`
 renderer keeps its own style. For nested commands, set the style on the

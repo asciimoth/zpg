@@ -17,6 +17,7 @@ exe = str(pathlib.Path(sys.argv[1]).resolve())
 render_probe = str(pathlib.Path(sys.argv[2]).resolve())
 fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'worker.py')
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
+env.pop('UNICODE_PROGRESS_BAR', None)
 
 def run(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -281,6 +282,33 @@ custom_frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', custom_capture, re.S)
 assert custom_frames
 for frame in custom_frames:
     assert all(len(line) < 24 for line in frame.decode().replace('\r', '').split('\n'))
+
+# Fira Code defaults must reach the terminal, with independent CLI overrides.
+fira_env = {'UNICODE_PROGRESS_BAR': 'true'}
+fira_args = ['--bar-style', 'fira', '--spinner-style', 'fira']
+fira_bar = ('\uee03' + '\uee04' * 8 + '\uee01' * 2 + '\uee02' + ' 75% 3/4').encode()
+fira_full = ('\uee03' + '\uee04' * 10 + '\uee05' + ' 100% 7/4').encode()
+assert run(*fira_args, render_probe) == expected_logs
+for args, overrides in [([render_probe], fira_env),
+                        ([*fira_args, render_probe], {'UNICODE_PROGRESS_BAR': 'false'})]:
+    fira_capture = terminal_capture(args, extra_env=overrides)
+    assert fira_bar in fira_capture and fira_full in fira_capture
+    fira_frames = set(re.findall('unknown ([\uee06-\uee0b]) 2 done', fira_capture.decode()))
+    assert len(fira_frames) > 1, fira_frames
+    fira_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', fira_capture, flags=re.S)
+    assert fira_logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
+fira_capture = terminal_capture(['--bar-style', 'ascii', render_probe], extra_env=fira_env)
+assert b'[#########---] 75% 3/4' in fira_capture
+assert re.search('unknown [\uee06-\uee0b] 2 done', fira_capture.decode())
+fira_capture = terminal_capture(['--spinner-style', 'ascii', render_probe], extra_env=fira_env)
+assert fira_bar in fira_capture
+assert re.search(rb'unknown [|/\\-] 2 done', fira_capture)
+fira_capture = terminal_capture(['--bar-style', 'ascii', '--spinner-style', 'ascii', render_probe],
+                                extra_env=fira_env)
+assert b'[#########---] 75% 3/4' in fira_capture
+assert not re.search('[\uee00-\uee0b]', fira_capture.decode())
+fira_capture = terminal_capture([render_probe], extra_env={'UNICODE_PROGRESS_BAR': 'false'})
+assert b'[#########---] 75% 3/4' in fira_capture
 
 # Replay the cursor operations to check partial lines even when drawing scrolls.
 # This fixture uses ASCII and only the escape sequences emitted by our renderer.

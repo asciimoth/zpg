@@ -18,19 +18,27 @@ pub const usage =
     \\Options:
     \\  --name TEXT                 Progress node label
     \\  --renderer bars|tree        Renderer (default: bars)
-    \\  --bar-style ascii|block|CHARS
+    \\  --bar-style ascii|block|fira|CHARS
     \\                              Two characters: filled, empty; or four:
     \\                              left border, filled, empty, right border
-    \\  --spinner-style ascii|dots|FRAMES
+    \\  --spinner-style ascii|dots|fira|FRAMES
     \\                              One to 64 characters, one per frame
     \\  --no-progress               Disable progress display
     \\
-    \\Styles default to ascii and apply only to the bars renderer.
+    \\Styles apply only to the bars renderer and default to ascii.
+    \\UNICODE_PROGRESS_BAR=true defaults both styles to fira (Fira Code).
+    \\CLI style options override these defaults separately.
     \\Quote custom characters that contain spaces or shell symbols.
     \\
 ;
-pub fn parse(args: []const []const u8) !Options {
+pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Options {
     var o: Options = .{};
+    if (std.mem.eql(u8, unicode_progress_bar orelse "", "true")) {
+        o.style = .{
+            .bar = try style.Bar.parse("fira"),
+            .spinner = try style.Spinner.parse("fira"),
+        };
+    }
     var name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -69,35 +77,58 @@ pub fn parse(args: []const []const u8) !Options {
     o.name = name orelse if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
 }
+test "environment selects Fira Code defaults and flags override each style" {
+    const defaults = try parse(&.{"--mock"}, "true");
+    try std.testing.expectEqualStrings("\u{ee04}", defaults.style.bar.filled);
+    try std.testing.expectEqualStrings("\u{ee06}", defaults.style.spinner.frame(0));
+    for ([_]?[]const u8{ null, "", "false", "1", "TRUE" }) |value| {
+        const o = try parse(&.{"true"}, value);
+        try std.testing.expectEqualStrings("#", o.style.bar.filled);
+        try std.testing.expectEqualStrings("|", o.style.spinner.frame(0));
+    }
+    const bar = try parse(&.{ "--bar-style", "ascii", "true" }, "true");
+    try std.testing.expectEqualStrings("#", bar.style.bar.filled);
+    try std.testing.expectEqualStrings("\u{ee06}", bar.style.spinner.frame(0));
+    const spinner = try parse(&.{ "--spinner-style", "dots", "true" }, "true");
+    try std.testing.expectEqualStrings("\u{ee04}", spinner.style.bar.filled);
+    try std.testing.expectEqualStrings("⠋", spinner.style.spinner.frame(0));
+    const both = try parse(&.{ "--bar-style", "block", "--spinner-style", "ascii", "true" }, "true");
+    try std.testing.expectEqualStrings("█", both.style.bar.filled);
+    try std.testing.expectEqualStrings("|", both.style.spinner.frame(0));
+    const explicit = try parse(&.{ "--bar-style", "fira", "--spinner-style", "fira", "true" }, "false");
+    try std.testing.expectEqualStrings("\u{ee04}", explicit.style.bar.filled);
+    try std.testing.expectEqualStrings("\u{ee06}", explicit.style.spinner.frame(0));
+}
+
 test "custom styles only apply before the command and also work with mock" {
-    const o = try parse(&.{ "--bar-style", "█ ", "--spinner-style", "dots", "tool", "--bar-style", "ascii", "--spinner-style", "ascii" });
+    const o = try parse(&.{ "--bar-style", "█ ", "--spinner-style", "dots", "tool", "--bar-style", "ascii", "--spinner-style", "ascii" }, null);
     try std.testing.expectEqualStrings("█", o.style.bar.filled);
     try std.testing.expectEqualStrings("⠋", o.style.spinner.frame(0));
     try std.testing.expectEqualSlices([]const u8, &.{ "tool", "--bar-style", "ascii", "--spinner-style", "ascii" }, o.argv);
-    const mock = try parse(&.{ "--mock", "--bar-style", "block", "--spinner-style", "ab" });
+    const mock = try parse(&.{ "--mock", "--bar-style", "block", "--spinner-style", "ab" }, null);
     try std.testing.expectEqualStrings("█", mock.style.bar.filled);
     try std.testing.expectEqualStrings("b", mock.style.spinner.frame(1));
-    try std.testing.expectError(error.MissingBarStyle, parse(&.{"--bar-style"}));
-    try std.testing.expectError(error.MissingSpinnerStyle, parse(&.{"--spinner-style"}));
-    try std.testing.expectError(error.InvalidBarStyle, parse(&.{ "--bar-style", "bad", "true" }));
-    try std.testing.expectError(error.InvalidSpinnerStyle, parse(&.{ "--spinner-style", "", "true" }));
+    try std.testing.expectError(error.MissingBarStyle, parse(&.{"--bar-style"}, null));
+    try std.testing.expectError(error.MissingSpinnerStyle, parse(&.{"--spinner-style"}, null));
+    try std.testing.expectError(error.InvalidBarStyle, parse(&.{ "--bar-style", "bad", "true" }, null));
+    try std.testing.expectError(error.InvalidSpinnerStyle, parse(&.{ "--spinner-style", "", "true" }, null));
 }
 test "renderer selection only applies before the command" {
-    try std.testing.expectEqual(Renderer.bars, (try parse(&.{"true"})).renderer);
-    const o = try parse(&.{ "--renderer", "tree", "tool", "--renderer", "bars" });
+    try std.testing.expectEqual(Renderer.bars, (try parse(&.{"true"}, null)).renderer);
+    const o = try parse(&.{ "--renderer", "tree", "tool", "--renderer", "bars" }, null);
     try std.testing.expectEqual(Renderer.tree, o.renderer);
     try std.testing.expectEqualStrings("--renderer", o.argv[1]);
     try std.testing.expectEqual(@as(usize, 3), o.argv.len);
-    try std.testing.expectError(error.MissingRenderer, parse(&.{"--renderer"}));
-    try std.testing.expectError(error.InvalidRenderer, parse(&.{ "--renderer", "bad", "true" }));
+    try std.testing.expectError(error.MissingRenderer, parse(&.{"--renderer"}, null));
+    try std.testing.expectError(error.InvalidRenderer, parse(&.{ "--renderer", "bad", "true" }, null));
 }
 test "leading flags and unchanged child arguments" {
-    const o = try parse(&.{ "--name", "worker", "tool", "--help", "a b", "" });
+    const o = try parse(&.{ "--name", "worker", "tool", "--help", "a b", "" }, null);
     try std.testing.expectEqualStrings("worker", o.name);
     try std.testing.expectEqual(@as(usize, 4), o.argv.len);
     try std.testing.expectEqualStrings("--help", o.argv[1]);
-    try std.testing.expectError(error.MockWithCommand, parse(&.{ "--mock", "tool" }));
-    try std.testing.expectError(error.MissingCommand, parse(&.{}));
-    try std.testing.expectError(error.UnknownFlag, parse(&.{"--bad"}));
-    try std.testing.expectError(error.MissingName, parse(&.{"--name"}));
+    try std.testing.expectError(error.MockWithCommand, parse(&.{ "--mock", "tool" }, null));
+    try std.testing.expectError(error.MissingCommand, parse(&.{}, null));
+    try std.testing.expectError(error.UnknownFlag, parse(&.{"--bad"}, null));
+    try std.testing.expectError(error.MissingName, parse(&.{"--name"}, null));
 }

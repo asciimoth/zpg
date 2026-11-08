@@ -12,7 +12,7 @@ fn run(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 3 and std.mem.eql(u8, args[1], "--mock-worker"))
         return @import("mock.zig").runWorker(init.io, args[2]);
-    const o = cli.parse(args[1..]) catch |err| {
+    const o = cli.parse(args[1..], init.environ_map.get("UNICODE_PROGRESS_BAR")) catch |err| {
         try output.print(init.io, "zpg: {s}\n{s}", .{ @errorName(err), cli.usage });
         return 2;
     };
