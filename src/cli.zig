@@ -8,6 +8,7 @@ pub const Report = struct {
 pub const Options = struct {
     name: []const u8 = "mock",
     progress: bool = true,
+    guess: bool = false,
     mock: bool = false,
     help: bool = false,
     report: ?Report = null,
@@ -30,6 +31,7 @@ pub const usage =
     \\  --spinner-style ascii|dots|fira|FRAMES
     \\                              One to 64 characters, one per frame
     \\  --no-progress               Disable progress display
+    \\  --guess                     Estimate file I/O progress (Linux)
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\  --                        End options before a command starting with '-'
     \\
@@ -60,6 +62,8 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             name = args[i];
         } else if (std.mem.eql(u8, a, "--no-progress")) {
             o.progress = false;
+        } else if (std.mem.eql(u8, a, "--guess")) {
+            o.guess = true;
         } else if (std.mem.eql(u8, a, "--report")) {
             if (o.report != null) return error.DuplicateReport;
             if (args.len - i < 3) return error.MissingReportCounts;
@@ -93,9 +97,21 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
     }
     if (o.mock and o.argv.len != 0) return error.MockWithCommand;
     if (o.report != null and (o.mock or o.argv.len != 0)) return error.ReportWithCommand;
+    if (o.guess and (o.mock or o.report != null)) return error.GuessRequiresCommand;
     if (!o.mock and !o.help and o.report == null and o.argv.len == 0) return error.MissingCommand;
     o.name = name orelse if (o.report != null) "" else if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
+}
+
+test "guess requires a command and preserves child options" {
+    const o = try parse(&.{ "--guess", "--no-progress", "cp", "--guess" }, null);
+    try std.testing.expect(o.guess and !o.progress);
+    try std.testing.expectEqualSlices([]const u8, &.{ "cp", "--guess" }, o.argv);
+    try std.testing.expect(!(try parse(&.{ "cp", "--guess" }, null)).guess);
+    try std.testing.expectError(error.MissingCommand, parse(&.{"--guess"}, null));
+    try std.testing.expectError(error.UnknownFlag, parse(&.{ "--guessa", "cp" }, null));
+    try std.testing.expectError(error.GuessRequiresCommand, parse(&.{ "--guess", "--mock" }, null));
+    try std.testing.expectError(error.GuessRequiresCommand, parse(&.{ "--guess", "--report", "1", "2" }, null));
 }
 
 fn parseCount(text: []const u8) !u32 {

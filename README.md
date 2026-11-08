@@ -15,6 +15,7 @@ zig build
 ./zig-out/bin/zpg --name worker ./worker --flag value
 ./zig-out/bin/zpg --renderer tree ./worker
 ./zig-out/bin/zpg --no-progress ./worker
+./zig-out/bin/zpg --guess cp large.iso /backup/
 ```
 
 Use `zpg [options] <command> [args...]`.
@@ -23,6 +24,43 @@ Flags after the
 command go to the child unchanged. Use `--` before a command name that starts
 with a hyphen.
 Commands use normal PATH lookup; no shell is started. Use `--help` for usage.
+
+Use `--guess` to estimate progress for commands that do not report it. On
+Linux, `zpg` samples `/proc` every 200 ms. It compares the current file position
+with the size of the largest non-empty regular file open for reading in the
+command's process group. This includes shell children that stay in that group.
+The method is similar to [progress](https://github.com/Xfennec/progress).
+For example:
+
+```sh
+zpg --guess cp large.iso /backup/
+zpg --guess sh -c 'tar cf archive.tar source/'
+```
+
+The display adds a separate estimate row and keeps native Zig progress reports:
+
+```text
+zpg |
+├─ cp |
+└─ I/O estimate (bytes): input.bin [#########---] 75% 768/1024
+```
+
+Counts are bytes, or KiB, MiB, GiB, or TiB for files too large for the progress
+protocol's 32-bit counts. The label gives the unit and current file name.
+Control characters and invalid UTF-8 in file names appear as `?`.
+This is an estimate for one open input file, not a total for the command.
+The percentage can change or go backwards when the command seeks, switches
+files, or reads a file that changes size. Reaching 100% does not mean the
+command has finished. Buffered reads can move the file position ahead of the
+work done. Memory-mapped I/O and positional reads such as `pread` do not
+provide useful file-position progress.
+
+Write-only and read/write files, pipes, devices, and empty files are excluded.
+With no usable input, or when `/proc` access is denied, the row shows
+`I/O estimate (unknown)`. It also returns to unknown when the input closes.
+On macOS, this mode currently shows unknown progress. `--no-progress` and
+redirected output disable sampling along with the display. `--guess` requires
+a command and cannot be combined with `--mock` or `--report`.
 
 Child stdin is closed. Child stdout and stderr are separate pipes, so the child
 does not see a terminal on either stream. Both streams go to `zpg`'s stderr

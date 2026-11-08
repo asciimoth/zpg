@@ -31,7 +31,9 @@ def run(*args, code=0):
 def worker(mode, *args, code=0):
     return run('--name', 'worker', sys.executable, fixture, mode, *args, code=code)
 
-for args in [(), ('--bad',), ('--name',), ('--mock', 'true'),
+for args in [(), ('--bad',), ('--guessa', 'true'), ('--name',), ('--mock', 'true'),
+             ('--guess',), ('--guess', '--mock'),
+             ('--guess', '--report', '1', '2'),
              ('--renderer',), ('--renderer', 'bad', 'true'),
              ('--bar-style',), ('--spinner-style',),
              ('--bar-style', 'bad', 'true'),
@@ -86,6 +88,9 @@ assert run('--', sys.executable, fixture, 'args', '--help') == run(
 payload = b'first\n\nlast\r\x1b[31m\x00' + bytes(range(256)) + b'x' * 20000
 for fd in ('1', '2'):
     assert worker('bytes', fd) == payload
+    assert run('--guess', sys.executable, fixture, 'bytes', fd) == payload
+assert run('--guess', sys.executable, fixture, 'exit', code=37) == b''
+assert run('--guess', sys.executable, fixture, 'signal', code=143) == b''
 assert run('true') == b''
 log = worker('volume')
 # Distinct alphabets let us check per-pipe order even if chunks interleave
@@ -299,6 +304,61 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
 
 
 expected_logs = b'log line\n' * 12 + b'partial continued\n'
+if sys.platform.startswith('linux'):
+    with tempfile.TemporaryDirectory() as directory:
+        source = pathlib.Path(directory) / 'input.bin'
+        source.write_bytes(b'x' * 1024)
+        args = [sys.executable, fixture, 'file-io', str(source)]
+        # The shell stays alive while its child reads, so this also checks
+        # process-group discovery. Nested supervisors must forward estimates.
+        for command in [args, ['sh', '-c', '"$@"; result=$?; exit "$result"', 'sh', *args],
+                        [exe, '--guess', *args]]:
+            capture = terminal_capture(['--guess', *command], cols=120)
+            assert b'I/O estimate (bytes): input.bin' in capture, capture
+            assert b'25% 256/1024' in capture, capture
+            assert b'75% 768/1024' in capture, capture
+            last_known = capture.rfind(b'75% 768/1024')
+            assert b'I/O estimate (unknown)' in capture[last_known:], capture
+            logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+            assert logs.replace(b'\x1b[J', b'') == b'copy step\r\n' * 2, logs
+        capture = terminal_capture(['--guess', '--renderer', 'tree', *args])
+        assert b'I/O estimate (bytes): input.bin' in capture, capture
+        capture = terminal_capture(['--guess', '--no-progress', *args])
+        assert capture == b'copy step\r\n' * 2, capture
+        assert run('--guess', *args) == b'copy step\n' * 2
+        capture = terminal_capture(['--guess', sys.executable, fixture,
+                                    'output-only', str(source) + '.out'])
+        assert b'I/O estimate (unknown)' in capture and b'100%' not in capture, capture
+        capture = terminal_capture(['--guess', *args], stop_after=.8, code=130)
+        assert b'25% 256/1024' in capture and capture.endswith(b'\x1b[J'), capture
+        # Descriptors can close after a proc entry opens. Such races must not
+        # add diagnostics or debug stack traces to the command's log.
+        capture = terminal_capture(['--guess', sys.executable, fixture,
+                                    'file-churn', str(source)])
+        logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+        assert logs.replace(b'\x1b[J', b'') == b'churn complete\r\n', logs
+        # File names must not inject terminal controls in either renderer.
+        unusual = pathlib.Path(directory) / 'line\n\x1b[2Jé.bin'
+        unusual.write_bytes(b'x' * 1024)
+        for renderer in ('bars', 'tree'):
+            capture = terminal_capture(['--guess', '--renderer', renderer,
+                                        sys.executable, fixture, 'file-io', str(unusual)],
+                                       cols=120)
+            assert 'line??[2Jé.bin'.encode() in capture, capture
+            assert b'\x1b[2J' not in capture, capture
+        # Sparse files exercise >4 GiB counts without substantial disk use.
+        with source.open('wb') as sparse:
+            sparse.truncate(1 << 34)
+        capture = terminal_capture(['--guess', sys.executable, fixture,
+                                    'file-seek', str(source)], cols=120)
+        assert b'I/O estimate (KiB): input.bin' in capture, capture
+        assert b'25% 4194304/16777216' in capture, capture
+        assert b'75% 12582912/16777216' in capture, capture
+
+# Native reports remain usable when the separate I/O estimate is enabled.
+capture = terminal_capture(['--guess', 'sh', '-c',
+                            'zpg --report 1 4 --name native; sleep .65'])
+assert b'native [###---------] 25% 1/4' in capture, capture
 # Every spawned child needs the descriptor and its environment variable,
 # including a child of a nested supervisor. Check this without frame timing.
 for prefix in [[], [exe]]:

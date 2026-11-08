@@ -46,3 +46,31 @@ elif mode == 'descendant':
     print('parent done', flush=True)
 elif mode == 'signal':
     os.kill(os.getpid(), signal.SIGTERM)
+elif mode in ('file-io', 'file-seek'):
+    path = sys.argv[2]
+    size = os.stat(path).st_size
+    # A larger output must not replace the input estimate. Use an unbuffered
+    # reader so the descriptor position matches each test step exactly.
+    with open(path, 'rb', buffering=0) as source, open(path + '.out', 'wb') as target:
+        target.truncate(size * 2)
+        for fraction in (1, 3):
+            position = size * fraction // 4
+            if mode == 'file-seek':
+                source.seek(position)
+            else:
+                source.read(position - source.tell())
+            os.write(1, b'copy step\n')
+            time.sleep(.65)
+    # The estimate must return to unknown after the input closes.
+    time.sleep(.65)
+elif mode == 'output-only':
+    with open(sys.argv[2], 'wb') as target:
+        target.write(b'x' * 4096)
+        target.flush()
+        time.sleep(.65)
+elif mode == 'file-churn':
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with open(sys.argv[2], 'rb', buffering=0) as source:
+            source.read(256)
+    print('churn complete')

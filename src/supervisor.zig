@@ -5,6 +5,7 @@ const output = @import("output.zig");
 const signals = @import("signals.zig");
 const progress = @import("progress.zig");
 const child_process = @import("child_process.zig");
+const guess = @import("guess.zig");
 fn wait(io: std.Io, child: *std.process.Child, done: *std.atomic.Value(bool)) !std.process.Child.Term {
     defer done.store(true, .release);
     return child.wait(io);
@@ -52,6 +53,15 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         defer err.cancel(io);
         var waiter = try io.concurrent(wait, .{ io, &child, &exited });
         defer _ = waiter.cancel(io) catch {};
+        // An IPC node stores its pipe index in the completed count. Ending a
+        // local child would increment that count, so use a sibling node.
+        const estimate = if (o.guess) root.start(guess.unknown_name, 0) else std.Progress.Node.none;
+        defer estimate.end();
+        var estimator: ?std.Io.Future(void) = if (estimate.index != .none)
+            try io.concurrent(guess.run, .{ io, pid, estimate })
+        else
+            null;
+        defer if (estimator) |*task| task.cancel(io);
         var shutdown_started = false;
         var shutdown_deadline: ?std.Io.Timestamp = null;
         while (!exited.load(.acquire)) {
@@ -68,6 +78,8 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
             try io.sleep(.fromMilliseconds(20), .awake);
         }
         const result = try waiter.await(io);
+        if (estimator) |*task| task.cancel(io);
+        estimator = null;
         const truncated = !try wait_for_drain(io, &done);
         out.cancel(io);
         err.cancel(io);
@@ -111,4 +123,8 @@ test "pipe drain expires when sleeps take longer than requested" {
     try std.testing.expect(!try wait_for_drain(io, &clock.done));
     try std.testing.expect(clock.elapsed.toMilliseconds() >= 2000);
     try std.testing.expect(clock.elapsed.toMilliseconds() < 4000);
+}
+
+test {
+    _ = guess;
 }
