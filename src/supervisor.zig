@@ -13,7 +13,7 @@ pub fn run(io: std.Io, o: cli.Options) !u8 {
     defer guard.restore();
     const term = blk: {
         var display: progress.Progress = .{};
-        const root = try display.start(io, o.progress, o.renderer, .{
+        const root = try display.start(io, o.progress, o.renderer, o.style, .{
             .root_name = "zpg",
             .refresh_rate_ns = output.progress_refresh_rate,
         });

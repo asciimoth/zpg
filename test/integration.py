@@ -29,7 +29,12 @@ def worker(mode, *args, code=0):
     return run('--name', 'worker', sys.executable, fixture, mode, *args, code=code)
 
 for args in [(), ('--bad',), ('--name',), ('--mock', 'true'),
-             ('--renderer',), ('--renderer', 'bad', 'true')]:
+             ('--renderer',), ('--renderer', 'bad', 'true'),
+             ('--bar-style',), ('--spinner-style',),
+             ('--bar-style', 'bad', 'true'),
+             ('--bar-style', '#\n', 'true'),
+             ('--spinner-style', '', 'true'),
+             ('--spinner-style', '\x1b[2J', 'true')]:
     run(*args, code=2)
 assert b'Usage:' in run('--help')
 run('zpg-command-that-does-not-exist', code=1)
@@ -197,7 +202,7 @@ print('integration checks passed (including terminal progress)')
 
 
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
-                     stop_after=None, code=0):
+                     stop_after=None, code=0, stdout_pattern=b''):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
     child_env = dict(terminal_env, **(extra_env or {}))
@@ -232,7 +237,8 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
         else:
             raise AssertionError('renderer terminal test timed out')
         stdout, _ = process.communicate(timeout=2)
-        assert process.returncode == code and stdout == b'', captured
+        assert process.returncode == code, (process.returncode, captured)
+        assert re.fullmatch(stdout_pattern, stdout, re.S), stdout
         return bytes(captured)
     finally:
         os.close(master)
@@ -255,6 +261,26 @@ assert b'unsafe?[2J label' in capture and b'\x1b[2J' not in capture
 logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
 assert logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
 assert capture.endswith(b'\x1b[J'), 'the final progress tree was not cleared'
+
+# Custom Unicode styles must preserve log bytes and render complete codepoints.
+custom_args = ['--bar-style', 'block', '--spinner-style', '⠋⠙']
+assert run(*custom_args, render_probe) == expected_logs
+custom_capture = terminal_capture([*custom_args, render_probe])
+assert ('█' * 9 + '    75% 3/4').encode() in custom_capture
+assert ('█' * 12 + ' 100% 7/4').encode() in custom_capture
+assert 'unknown ⠋ 2 done'.encode() in custom_capture
+assert 'unknown ⠙ 2 done'.encode() in custom_capture
+custom_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', custom_capture, flags=re.S)
+assert custom_logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
+custom_capture.decode('utf-8')
+custom_capture = terminal_capture(['--bar-style', '(▓░)', '--spinner-style', 'ab', render_probe])
+assert ('(' + '▓' * 9 + '░' * 3 + ') 75% 3/4').encode() in custom_capture
+assert b'unknown a 2 done' in custom_capture and b'unknown b 2 done' in custom_capture
+custom_capture = terminal_capture([*custom_args, render_probe], cols=24)
+custom_frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', custom_capture, re.S)
+assert custom_frames
+for frame in custom_frames:
+    assert all(len(line) < 24 for line in frame.decode().replace('\r', '').split('\n'))
 
 # Replay the cursor operations to check partial lines even when drawing scrolls.
 # This fixture uses ASCII and only the escape sequences emitted by our renderer.
@@ -330,12 +356,19 @@ for size in [(3, 8), (1, 1)]:
 # Nesting still sends progress to the outer process, which owns the display.
 capture = terminal_capture([exe, render_probe])
 assert b'[#########---] 75% 3/4' in capture
+capture = terminal_capture([*custom_args, exe, '--bar-style', 'ascii', render_probe])
+assert ('█' * 9 + '    75% 3/4').encode() in capture
+assert b'[#########---]' not in capture
+capture = terminal_capture([*custom_args, '--mock'], stop_after=.8, code=130,
+                           stdout_pattern=rb'(mock stdout: work in progress\n)+')
+assert '█'.encode() in capture
 capture = terminal_capture(['--renderer', 'tree', render_probe])
 assert b'\x1b' in capture and b'render probe' in capture
 assert b'[#########---]' not in capture
 capture = terminal_capture([render_probe], extra_env={'NO_COLOR': '1'})
 assert b'[#########---] 75% 3/4' in capture
 for args, overrides in [(['--no-progress', render_probe], {}),
+                        (['--no-progress', *custom_args, render_probe], {}),
                         ([render_probe], {'TERM': 'dumb'})]:
     capture = terminal_capture(args, extra_env=overrides)
     assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), (args, overrides, capture)

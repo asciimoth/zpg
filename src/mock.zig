@@ -239,12 +239,12 @@ pub fn runWorker(io: std.Io, kind: []const u8) !u8 {
     return 0;
 }
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, progress: bool, style: cli.Renderer) !u8 {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, o: cli.Options) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
     const exe = try std.process.executablePathAlloc(io, allocator);
     var display: progress_display.Progress = .{};
-    const root = try display.start(io, progress, style, .{
+    const root = try display.start(io, o.progress, o.renderer, o.style, .{
         .root_name = "mock",
         .estimated_total_items = 6,
         .refresh_rate_ns = output.progress_refresh_rate,

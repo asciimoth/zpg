@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const output = @import("output.zig");
 const renderer = @import("renderer.zig");
+const styles = @import("style.zig");
 
 // std.Progress has one process-wide instance. This file is used only by its
 // progressParentFile callback; all other I/O calls keep the original userdata.
@@ -19,10 +20,10 @@ pub const Progress = struct {
 
     // Keep this object at a stable address until end() returns: std.Progress
     // borrows the vtable while it collects child progress and emits snapshots.
-    pub fn start(self: *Progress, io: std.Io, enabled: bool, style: cli.Renderer, options: std.Progress.Options) !std.Progress.Node {
+    pub fn start(self: *Progress, io: std.Io, enabled: bool, mode: cli.Renderer, style: styles.Style, options: std.Progress.Options) !std.Progress.Node {
         if (!enabled) return .none;
         const no_parent = if (io.vtable.progressParentFile(io.userdata)) |_| false else |err| err == error.EnvironmentVariableMissing;
-        if (style == .tree or !no_parent) {
+        if (mode == .tree or !no_parent) {
             self.root = std.Progress.start(io, options);
             return self.root;
         }
@@ -31,7 +32,7 @@ pub const Progress = struct {
         const handles = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
         const pipe: [2]std.Io.File = .{ .{ .handle = handles[0], .flags = .{ .nonblocking = false } }, .{ .handle = handles[1], .flags = .{ .nonblocking = false } } };
         errdefer for (pipe) |file| file.close(io);
-        self.worker = try io.concurrent(receive, .{ io, pipe[0] });
+        self.worker = try io.concurrent(receive, .{ io, pipe[0], style });
         self.pipe = pipe;
         local_parent = pipe[1];
         self.vtable = io.vtable.*;
@@ -61,7 +62,7 @@ fn readAll(io: std.Io, file: std.Io.File, bytes: []u8) !void {
     }
 }
 
-fn receive(io: std.Io, file: std.Io.File) void {
+fn receive(io: std.Io, file: std.Io.File, style: styles.Style) void {
     var packet: [std.Progress.max_packet_len]u8 = undefined;
     var frame_buffer: [131072]u8 = undefined;
     var tick: usize = 0;
@@ -78,7 +79,7 @@ fn receive(io: std.Io, file: std.Io.File) void {
             .arg = &size,
         } }) catch return;
         var frame = std.Io.Writer.fixed(&frame_buffer);
-        const lines = renderer.render(&frame, snapshot, size.col, size.row, tick / 5) catch continue;
+        const lines = renderer.render(&frame, snapshot, size.col, size.row, tick / 5, style) catch continue;
         // A failed display must not stop draining the progress pipe and block
         // the stdlib collector. The log writer reports output errors separately.
         output.draw(io, frame.buffered(), lines) catch {};

@@ -17,7 +17,7 @@ zig build
 ./zig-out/bin/zpg --no-progress ./worker
 ```
 
-Use `zpg [--name TEXT] [--renderer bars|tree] [--no-progress] <command> [args...]`.
+Use `zpg [options] <command> [args...]`.
 The name sets the progress node label and defaults to the command's basename.
 Flags after the
 command go to the child unchanged.
@@ -50,6 +50,34 @@ Use `--renderer tree` for the standard Zig tree display. Use `just demo` to see
 the default renderer, or `./zig-out/bin/zpg --renderer tree --mock` for the
 standard display. The outermost `zpg` selects the renderer when commands are
 nested.
+
+Set bar and spinner styles with `--bar-style` and `--spinner-style`:
+
+```sh
+./zig-out/bin/zpg --bar-style block --spinner-style dots ./worker
+./zig-out/bin/zpg --bar-style '█ ' --spinner-style '⠋⠙⠹⠸' --mock
+./zig-out/bin/zpg --bar-style '(=.)' --spinner-style '.oO@' ./worker
+```
+
+Both options default to `ascii`. The `block` bar uses `█` for completed items
+and spaces for remaining items, with no borders. The `dots` spinner uses
+braille characters. For example, a half-complete node with the block style is:
+
+```text
+build ██████       50% 1/2
+```
+
+For a custom bar, supply two characters (filled, empty) or four characters
+(left border, filled, empty, right border). Bars have 12 positions. For a custom
+spinner, supply 1 to 64 characters in frame order. Each character must be one
+UTF-8 codepoint; combined characters and multi-character frames are not
+supported. Control characters are rejected. Quote values that contain spaces
+or shell symbols. Block and braille characters use one column; other non-ASCII
+characters use a conservative two-column estimate and can be clipped early.
+
+Styles apply to the `bars` renderer, including `--mock`. The standard `tree`
+renderer keeps its own style. For nested commands, set the style on the
+outermost `zpg`.
 
 The renderer clears the tree before each log write and redraws it after logs
 scroll. It does not reserve a fixed footer. When stderr is redirected, logs
