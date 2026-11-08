@@ -30,6 +30,39 @@ as they arrive. Order is preserved within each stream. Output from the two
 streams can interleave, including within a line.
 
 Zig-aware children connect through the standard library's progress mechanism.
+Shell scripts can use `zpg --report COMPLETED TOTAL` to send an update through
+the same pipe. For example, run this script with `zpg --name build sh build.sh`:
+
+```sh
+#!/bin/sh
+set -e
+zpg --report 0 2
+compile_assets
+zpg --report 1 2
+compile_code
+zpg --report 2 2
+```
+
+Each call sets absolute counts and exits without output. The parent keeps the
+last update until the next report or until the script exits. Use
+`zpg --report 3 10 --name 'compile files'` to also change the node label. Without
+`--name`, the report uses the supervisor's original node label. Use a total of
+`0` when the total is unknown. Counts must be decimal integers from 0 to
+4294967294.
+
+Run `just demo-report` to see a [shell example](examples/report-demo.sh). It
+starts three workers in parallel. Each worker reports four steps and writes
+plain log lines. The main script reports its own three stages. `just demo`
+continues to run the Zig mock workload.
+
+Reports do nothing and return success when no `ZIG_PROGRESS` pipe is present.
+Thus, the script also works without a supervisor, with `--no-progress`, or
+with redirected output. Invalid arguments return 2; an invalid pipe or a
+write failure returns 1. Keep `zpg` on PATH for scripts that use this command.
+Reports share one node per supervised command: concurrent reports replace
+each other. Use separate nested `zpg` commands for independent progress nodes.
+Do not mix shell reports with another progress producer on the same pipe.
+
 The default `bars` renderer shows a text bar, percentage, and item counts for
 each node with a known total. Nodes with an unknown total show a spinner
 and a completed count when available. For example:

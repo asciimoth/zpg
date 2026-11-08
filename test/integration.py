@@ -16,6 +16,7 @@ import time
 exe = str(pathlib.Path(sys.argv[1]).resolve())
 render_probe = str(pathlib.Path(sys.argv[2]).resolve())
 fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'worker.py')
+report_demo = str(pathlib.Path(__file__).parent.parent / 'examples' / 'report-demo.sh')
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 env.pop('UNICODE_PROGRESS_BAR', None)
 
@@ -38,6 +39,40 @@ for args in [(), ('--bad',), ('--name',), ('--mock', 'true'),
              ('--spinner-style', '\x1b[2J', 'true')]:
     run(*args, code=2)
 assert b'Usage:' in run('--help')
+# A report is silent without a supervisor, including redirected scripts.
+report_env = dict(env)
+report_env.pop('ZIG_PROGRESS', None)
+p = subprocess.run([exe, '--report', '1', '2'], env=report_env,
+                   capture_output=True, timeout=5)
+assert (p.returncode, p.stdout, p.stderr) == (0, b'', b'')
+for args in [('--report',), ('--report', '1'), ('--report', '-1', '2'),
+             ('--report', '1', '4294967295'), ('--report', '1', '2', 'true')]:
+    run(*args, code=2)
+# Inspect the wire packet independently of the renderer. Separate reporter
+# processes share one inherited pipe, as they do in a shell script.
+read_fd, write_fd = os.pipe()
+try:
+    for completed, total, name in [(1, 4, ''), (3, 4, 'compile'), (5, 0, 'files')]:
+        p = subprocess.run([exe, '--report', str(completed), str(total), '--name', name],
+                           env=dict(report_env, ZIG_PROGRESS=str(write_fd)),
+                           pass_fds=(write_fd,), capture_output=True, timeout=5)
+        assert (p.returncode, p.stdout, p.stderr) == (0, b'', b'')
+        ready, _, _ = select.select([read_fd], [], [], 2)
+        assert ready, 'report did not write a snapshot'
+        packet = os.read(read_fd, 4096)
+        assert len(packet) == 130 and packet[0] == 1 and packet[-1] == 255, packet
+        assert struct.unpack('<II', packet[1:9]) == (completed, total)
+        assert packet[9:129].split(b'\0', 1)[0] == name.encode()
+finally:
+    os.close(read_fd)
+    os.close(write_fd)
+script = 'set -e; zpg --report 1 4; printf "script log\\n"; zpg --report 4 4'
+assert run('sh', '-c', script) == b'script log\n'
+assert run('--no-progress', 'sh', '-c', script) == b'script log\n'
+demo_log = run('--name', 'shell demo', 'sh', report_demo)
+for worker_name in (b'indexer', b'compiler', b'uploader'):
+    assert worker_name + b': finish complete' in demo_log
+assert b'shell demo: complete' in demo_log
 run('zpg-command-that-does-not-exist', code=1)
 log = worker('args', '--flag', 'a b', '', '$(false)')
 assert b"['--flag', 'a b', '', '$(false)']" in log
@@ -249,6 +284,24 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
 
 
 expected_logs = b'log line\n' * 12 + b'partial continued\n'
+demo_capture = terminal_capture(['--name', 'shell demo', 'sh', report_demo])
+assert b'shell demo [############] 100% 3/3' in demo_capture
+for worker_name in (b'indexer', b'compiler', b'uploader'):
+    assert worker_name + b': build' in demo_capture, worker_name
+# Reports must remain visible after each short-lived reporter exits, and
+# reach either renderer through a nested supervisor.
+report_script = ('set -e; zpg --report 1 4; sleep .5; '
+                 'zpg --report 3 4 --name compile; sleep .5; '
+                 'zpg --report 4 4 --name done; sleep .5')
+for prefix in [[], [exe]]:
+    report_capture = terminal_capture([*prefix, '--name', 'script', 'sh', '-c', report_script])
+    assert b'script [###---------] 25% 1/4' in report_capture, report_capture
+    assert b'compile [#########---] 75% 3/4' in report_capture, report_capture
+    assert b'done [############] 100% 4/4' in report_capture, report_capture
+report_capture = terminal_capture(['--renderer', 'tree', 'sh', '-c', report_script])
+assert b'compile' in report_capture and b'done' in report_capture, report_capture
+report_capture = terminal_capture(['--no-progress', 'sh', '-c', report_script])
+assert report_capture == b'', report_capture
 assert run('--renderer', 'bars', render_probe) == expected_logs
 capture = terminal_capture([render_probe], rows=8)
 frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)

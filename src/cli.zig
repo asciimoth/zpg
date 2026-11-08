@@ -1,11 +1,16 @@
 const std = @import("std");
 const style = @import("style.zig");
 pub const Renderer = enum { bars, tree };
+pub const Report = struct {
+    completed: u32,
+    total: u32,
+};
 pub const Options = struct {
     name: []const u8 = "mock",
     progress: bool = true,
     mock: bool = false,
     help: bool = false,
+    report: ?Report = null,
     renderer: Renderer = .bars,
     style: style.Style = .{},
     argv: []const []const u8 = &.{},
@@ -13,6 +18,7 @@ pub const Options = struct {
 pub const usage =
     \\Usage: zpg [options] <command> [args...]
     \\       zpg [options] --mock
+    \\       zpg --report COMPLETED TOTAL [--name TEXT]
     \\       zpg --help
     \\
     \\Options:
@@ -24,6 +30,7 @@ pub const usage =
     \\  --spinner-style ascii|dots|fira|FRAMES
     \\                              One to 64 characters, one per frame
     \\  --no-progress               Disable progress display
+    \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\
     \\Styles apply only to the bars renderer and default to ascii.
     \\UNICODE_PROGRESS_BAR=true defaults both styles to fira (Fira Code).
@@ -49,6 +56,14 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             name = args[i];
         } else if (std.mem.eql(u8, a, "--no-progress")) {
             o.progress = false;
+        } else if (std.mem.eql(u8, a, "--report")) {
+            if (o.report != null) return error.DuplicateReport;
+            if (args.len - i < 3) return error.MissingReportCounts;
+            o.report = .{
+                .completed = try parseCount(args[i + 1]),
+                .total = try parseCount(args[i + 2]),
+            };
+            i += 2;
         } else if (std.mem.eql(u8, a, "--renderer")) {
             i += 1;
             if (i == args.len) return error.MissingRenderer;
@@ -73,9 +88,37 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
         }
     }
     if (o.mock and o.argv.len != 0) return error.MockWithCommand;
-    if (!o.mock and !o.help and o.argv.len == 0) return error.MissingCommand;
-    o.name = name orelse if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
+    if (o.report != null and (o.mock or o.argv.len != 0)) return error.ReportWithCommand;
+    if (!o.mock and !o.help and o.report == null and o.argv.len == 0) return error.MissingCommand;
+    o.name = name orelse if (o.report != null) "" else if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
+}
+
+fn parseCount(text: []const u8) !u32 {
+    if (text.len == 0) return error.InvalidReportCount;
+    for (text) |c| if (c < '0' or c > '9') return error.InvalidReportCount;
+    const count = std.fmt.parseInt(u32, text, 10) catch return error.InvalidReportCount;
+    // The progress protocol reserves this value for child process nodes.
+    if (count == std.math.maxInt(u32)) return error.InvalidReportCount;
+    return count;
+}
+
+test "report parses absolute counts and preserves child flags" {
+    const o = try parse(&.{ "--report", "3", "10", "--name", "build" }, null);
+    try std.testing.expectEqual(Report{ .completed = 3, .total = 10 }, o.report.?);
+    try std.testing.expectEqualStrings("build", o.name);
+    try std.testing.expectEqualStrings("", (try parse(&.{ "--report", "0", "0" }, null)).name);
+    for ([_][]const u8{ "", "-1", "+1", "1.5", "0xff", "4_000", "4294967295", "4294967296" }) |value| {
+        try std.testing.expectError(error.InvalidReportCount, parse(&.{ "--report", value, "10" }, null));
+        try std.testing.expectError(error.InvalidReportCount, parse(&.{ "--report", "0", value }, null));
+    }
+    try std.testing.expectError(error.MissingReportCounts, parse(&.{ "--report", "1" }, null));
+    try std.testing.expectError(error.ReportWithCommand, parse(&.{ "--report", "1", "2", "true" }, null));
+    try std.testing.expectError(error.ReportWithCommand, parse(&.{ "--mock", "--report", "1", "2" }, null));
+    try std.testing.expectError(error.DuplicateReport, parse(&.{ "--report", "1", "2", "--report", "2", "2" }, null));
+    const child = try parse(&.{ "sh", "--report", "1", "2" }, null);
+    try std.testing.expect(child.report == null);
+    try std.testing.expectEqual(@as(usize, 4), child.argv.len);
 }
 test "environment selects Fira Code defaults and flags override each style" {
     const defaults = try parse(&.{"--mock"}, "true");

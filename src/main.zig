@@ -20,6 +20,10 @@ fn run(init: std.process.Init) !u8 {
         try output.print(init.io, "{s}", .{cli.usage});
         return 0;
     }
+    if (o.report) |counts| {
+        try @import("report.zig").send(init.io, counts, o.name);
+        return 0;
+    }
     if (o.mock) return @import("mock.zig").run(init.io, init.arena.allocator(), o);
     return @import("supervisor.zig").run(init.io, o);
 }
