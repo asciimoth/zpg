@@ -11,6 +11,7 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
@@ -134,9 +135,19 @@ for sig, mode in [(signal.SIGINT, 'stop'), (signal.SIGTERM, 'stop'), (signal.SIG
         pass
     else:
         raise AssertionError('child not reaped')
-start = time.monotonic()
-log = worker('descendant')
-assert b'pipe drain timeout' in log and time.monotonic() - start < 3.5
+# A descendant can keep inherited capture pipes open after zpg exits. Use files
+# so the elapsed time measures zpg's exit, not the descendant's pipe lifetime.
+with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    start = time.monotonic()
+    p = subprocess.run([exe, '--name', 'worker', sys.executable, fixture,
+                        'descendant'], stdout=stdout, stderr=stderr, env=env,
+                       timeout=15)
+    elapsed = time.monotonic() - start
+    stdout.seek(0)
+    stderr.seek(0)
+    log = stderr.read()
+    assert p.returncode == 0 and stdout.read() == b'', (p.returncode, log)
+    assert b'pipe drain timeout' in log and elapsed < 3.5, (elapsed, log)
 log = run('zpg', '--mock')
 assert log.count(b'mock stdout:') >= 20 and log.count(b'mock stderr:') >= 10
 workers = re.findall(rb'mock worker (indexer|compiler|uploader) \(pid (\d+)\): started', log)
@@ -284,10 +295,23 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
 
 
 expected_logs = b'log line\n' * 12 + b'partial continued\n'
+# Every spawned child needs the descriptor and its environment variable,
+# including a child of a nested supervisor. Check this without frame timing.
+for prefix in [[], [exe]]:
+    capture = terminal_capture([*prefix, sys.executable, fixture, 'progress-env'])
+    assert b'progress pipe: open\r\n' in capture, capture
+capture = terminal_capture(['--no-progress', sys.executable, fixture, 'progress-env'])
+assert capture == b'progress pipe: absent\r\n', capture
+# Exercise spawn failure and exit status while a progress pipe is active.
+terminal_capture(['zpg-command-that-does-not-exist'], code=1)
+terminal_capture([sys.executable, fixture, 'exit'], code=37)
+# The demo can exit before its final report is drawn. Check completion and
+# drawing here; the report fixture below keeps exact counts visible before exit.
 demo_capture = terminal_capture(['--name', 'shell demo', 'sh', report_demo])
-assert b'shell demo [############] 100% 3/3' in demo_capture
+assert b'\x1b[?2026h' in demo_capture, demo_capture
+assert b'shell demo: complete\r\n' in demo_capture, demo_capture
 for worker_name in (b'indexer', b'compiler', b'uploader'):
-    assert worker_name + b': build' in demo_capture, worker_name
+    assert worker_name + b': build' in demo_capture, (worker_name, demo_capture)
 # Reports must remain visible after each short-lived reporter exits, and
 # reach either renderer through a nested supervisor.
 report_script = ('set -e; zpg --report 1 4; sleep .5; '
@@ -429,8 +453,9 @@ assert b'75% 3/4' in capture and capture.endswith(b'\x1b[J')
 capture = terminal_capture([render_probe], rows=12, cols=80, resize=(5, 24))
 frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', capture, re.S)
 assert frames
-last_lines = frames[-1].replace(b'\r', b'').split(b'\n')
-assert len(last_lines) <= 3 and all(len(line) < 24 for line in last_lines)
+# Each fixture glyph uses one column, including the Unicode tree branches.
+last_lines = frames[-1].decode().replace('\r', '').split('\n')
+assert len(last_lines) <= 3 and all(len(line) < 24 for line in last_lines), last_lines
 for size in [(3, 8), (1, 1)]:
     terminal_capture([render_probe], rows=size[0], cols=size[1])
 

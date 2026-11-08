@@ -4,11 +4,20 @@ const reader = @import("stream_reader.zig");
 const output = @import("output.zig");
 const signals = @import("signals.zig");
 const progress = @import("progress.zig");
+const child_process = @import("child_process.zig");
 fn wait(io: std.Io, child: *std.process.Child, done: *std.atomic.Value(bool)) !std.process.Child.Term {
     defer done.store(true, .release);
     return child.wait(io);
 }
-pub fn run(io: std.Io, o: cli.Options) !u8 {
+fn wait_for_drain(io: std.Io, done: *std.atomic.Value(u32)) !bool {
+    const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(2));
+    while (done.load(.acquire) != 2) {
+        if (std.Io.Clock.awake.now(io).compare(.gte, deadline)) return false;
+        try io.sleep(.fromMilliseconds(20), .awake);
+    }
+    return true;
+}
+pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
     const term = blk: {
@@ -20,7 +29,7 @@ pub fn run(io: std.Io, o: cli.Options) !u8 {
         defer display.end(io);
         const node = root.start(o.name, 0);
         defer node.end();
-        var child = try std.process.spawn(io, .{ .argv = o.argv, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe, .progress_node = node, .pgid = 0 });
+        var child = try child_process.spawn(io, environ, o.argv, node);
         defer child.kill(io);
         const pid = child.id.?;
         const stdout = child.stdout.?;
@@ -43,21 +52,23 @@ pub fn run(io: std.Io, o: cli.Options) !u8 {
         defer err.cancel(io);
         var waiter = try io.concurrent(wait, .{ io, &child, &exited });
         defer _ = waiter.cancel(io) catch {};
-        var shutdown_ticks: ?usize = null;
+        var shutdown_started = false;
+        var shutdown_deadline: ?std.Io.Timestamp = null;
         while (!exited.load(.acquire)) {
-            if (shutdown_ticks) |ticks| {
-                if (ticks == 100) std.posix.kill(-pid, .KILL) catch {};
-                shutdown_ticks = ticks + 1;
-            } else if (signals.get() != 0 or failed.load(.acquire)) {
+            if (shutdown_deadline) |deadline| {
+                if (std.Io.Clock.awake.now(io).compare(.gte, deadline)) {
+                    std.posix.kill(-pid, .KILL) catch {};
+                    shutdown_deadline = null;
+                }
+            } else if (!shutdown_started and (signals.get() != 0 or failed.load(.acquire))) {
                 std.posix.kill(-pid, .TERM) catch {};
-                shutdown_ticks = 0;
+                shutdown_started = true;
+                shutdown_deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(2));
             }
             try io.sleep(.fromMilliseconds(20), .awake);
         }
         const result = try waiter.await(io);
-        var ticks: usize = 0;
-        while (done.load(.acquire) != 2 and ticks < 100) : (ticks += 1) try io.sleep(.fromMilliseconds(20), .awake);
-        const truncated = done.load(.acquire) != 2;
+        const truncated = !try wait_for_drain(io, &done);
         out.cancel(io);
         err.cancel(io);
         queue.close(io);
@@ -72,4 +83,32 @@ pub fn run(io: std.Io, o: cli.Options) !u8 {
         .signal => |sig| @intCast(@min(255, 128 + @as(u32, @backingInt(sig)))),
         else => 1,
     };
+}
+
+test "pipe drain expires when sleeps take longer than requested" {
+    const SlowClock = struct {
+        elapsed: std.Io.Duration = .zero,
+        done: std.atomic.Value(u32) = .init(0),
+
+        fn now(userdata: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.elapsed.nanoseconds);
+        }
+
+        fn sleep(userdata: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            // Model delayed wakeups and a descendant that closes its pipes
+            // after four seconds, as in the integration fixture.
+            self.elapsed.nanoseconds += std.Io.Duration.fromMilliseconds(50).nanoseconds;
+            if (self.elapsed.toMilliseconds() >= 4000) self.done.store(2, .release);
+        }
+    };
+    var clock: SlowClock = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = SlowClock.now;
+    vtable.sleep = SlowClock.sleep;
+    const io: std.Io = .{ .userdata = &clock, .vtable = &vtable };
+    try std.testing.expect(!try wait_for_drain(io, &clock.done));
+    try std.testing.expect(clock.elapsed.toMilliseconds() >= 2000);
+    try std.testing.expect(clock.elapsed.toMilliseconds() < 4000);
 }

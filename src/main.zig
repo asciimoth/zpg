@@ -24,10 +24,11 @@ fn run(init: std.process.Init) !u8 {
         try @import("report.zig").send(init.io, counts, o.name);
         return 0;
     }
-    if (o.mock) return @import("mock.zig").run(init.io, init.arena.allocator(), o);
-    return @import("supervisor.zig").run(init.io, o);
+    if (o.mock) return @import("mock.zig").run(init.io, init.arena.allocator(), init.minimal.environ, o);
+    return @import("supervisor.zig").run(init.io, init.minimal.environ, o);
 }
 test {
     _ = cli;
     _ = @import("progress.zig");
+    _ = @import("supervisor.zig");
 }

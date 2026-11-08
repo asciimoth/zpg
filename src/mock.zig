@@ -4,6 +4,7 @@ const signals = @import("signals.zig");
 const reader = @import("stream_reader.zig");
 const cli = @import("cli.zig");
 const progress_display = @import("progress.zig");
+const child_process = @import("child_process.zig");
 
 // A fixed seed makes the demo repeatable. The tree shape and task times still vary.
 const seed = 0x7a70672d6d6f636b;
@@ -140,20 +141,14 @@ fn waitChild(io: std.Io, child: *std.process.Child, exited: *std.atomic.Value(bo
 
 fn runWorkerProcess(
     io: std.Io,
+    environ: std.process.Environ,
     exe: []const u8,
     kind: []const u8,
     node: std.Progress.Node,
     queue: *output.Queue,
     failed: *std.atomic.Value(bool),
 ) !std.process.Child.Term {
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ exe, "--mock-worker", kind },
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
-        .progress_node = node,
-        .pgid = 0,
-    });
+    var child = try child_process.spawn(io, environ, &.{ exe, "--mock-worker", kind }, node);
     defer child.kill(io);
     const pid = child.id.?;
     const stdout = child.stdout.?;
@@ -239,7 +234,7 @@ pub fn runWorker(io: std.Io, kind: []const u8) !u8 {
     return 0;
 }
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, o: cli.Options) !u8 {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Environ, o: cli.Options) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
     const exe = try std.process.executablePathAlloc(io, allocator);
@@ -263,11 +258,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, o: cli.Options) !u8 {
     var failed = std.atomic.Value(bool).init(false);
     var writer = try io.concurrent(output.run, .{ io, &queue, &failed });
     defer writer.cancel(io);
-    var indexer = try io.concurrent(runWorkerProcess, .{ io, exe, "indexer", indexer_node, &queue, &failed });
+    var indexer = try io.concurrent(runWorkerProcess, .{ io, environ, exe, "indexer", indexer_node, &queue, &failed });
     defer _ = indexer.cancel(io) catch {};
-    var compiler = try io.concurrent(runWorkerProcess, .{ io, exe, "compiler", compiler_node, &queue, &failed });
+    var compiler = try io.concurrent(runWorkerProcess, .{ io, environ, exe, "compiler", compiler_node, &queue, &failed });
     defer _ = compiler.cancel(io) catch {};
-    var uploader = try io.concurrent(runWorkerProcess, .{ io, exe, "uploader", uploader_node, &queue, &failed });
+    var uploader = try io.concurrent(runWorkerProcess, .{ io, environ, exe, "uploader", uploader_node, &queue, &failed });
     defer _ = uploader.cancel(io) catch {};
 
     var prng = std.Random.DefaultPrng.init(seed);

@@ -1,5 +1,6 @@
 import os
 import signal
+import stat
 import sys
 import time
 
@@ -22,6 +23,15 @@ elif mode == 'partial':
         time.sleep(1)
 elif mode == 'exit':
     sys.exit(37)
+elif mode == 'progress-env':
+    value = os.environ.get('ZIG_PROGRESS')
+    if value is None:
+        print('progress pipe: absent')
+    else:
+        fd = int(value)
+        assert os.get_inheritable(fd), 'progress descriptor is not inheritable'
+        assert stat.S_ISFIFO(os.fstat(fd).st_mode), 'progress descriptor is not a pipe'
+        print('progress pipe: open')
 elif mode in ('stop', 'stubborn'):
     if mode == 'stubborn':
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
