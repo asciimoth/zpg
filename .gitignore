@@ -2,3 +2,10 @@
 zig-out/
 zig-pkg/
 *.o
+/result
+/result-*
+/.direnv/
+/.pre-commit-config.yaml
+
+/.envrc
+/local
