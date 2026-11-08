@@ -1,0 +1,17 @@
+name: check
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: zig version
+      - run: zig fmt --check build.zig src test/fixtures/probe.zig
+      - run: zig build
+      - run: zig build test
