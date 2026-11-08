@@ -1,4 +1,4 @@
-"""Behavior checks for pipes, process cleanup, and stdlib terminal progress."""
+"""Behavior checks for pipes, process cleanup, and terminal progress."""
 import errno
 import fcntl
 import struct
@@ -14,6 +14,7 @@ import sys
 import time
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
+render_probe = str(pathlib.Path(sys.argv[2]).resolve())
 fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'worker.py')
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 
@@ -27,7 +28,8 @@ def run(*args, code=0):
 def worker(mode, *args, code=0):
     return run('--name', 'worker', sys.executable, fixture, mode, *args, code=code)
 
-for args in [(), ('--bad',), ('--name',), ('--mock', 'true')]:
+for args in [(), ('--bad',), ('--name',), ('--mock', 'true'),
+             ('--renderer',), ('--renderer', 'bad', 'true')]:
     run(*args, code=2)
 assert b'Usage:' in run('--help')
 run('zpg-command-that-does-not-exist', code=1)
@@ -192,3 +194,149 @@ while True:
 os.close(master)
 assert p.wait(timeout=2) == 0 and b'\x1b' not in log
 print('integration checks passed (including terminal progress)')
+
+
+def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
+                     stop_after=None, code=0):
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+    child_env = dict(terminal_env, **(extra_env or {}))
+    process = subprocess.Popen([exe, *args], stdout=subprocess.PIPE,
+                               stderr=slave, env=child_env)
+    os.close(slave)
+    captured = bytearray()
+    start = time.monotonic()
+    resized = False
+    stopped = False
+    try:
+        while time.monotonic() - start < 5:
+            if stop_after and not stopped and time.monotonic() - start > stop_after:
+                process.send_signal(signal.SIGINT)
+                stopped = True
+            if resize and not resized and time.monotonic() - start > .5:
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            struct.pack('HHHH', *resize, 0, 0))
+                resized = True
+            ready, _, _ = select.select([master], [], [], .05)
+            if not ready:
+                continue
+            try:
+                data = os.read(master, 65536)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    break
+                raise
+            if not data:
+                break
+            captured.extend(data)
+        else:
+            raise AssertionError('renderer terminal test timed out')
+        stdout, _ = process.communicate(timeout=2)
+        assert process.returncode == code and stdout == b'', captured
+        return bytes(captured)
+    finally:
+        os.close(master)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+expected_logs = b'log line\n' * 12 + b'partial continued\n'
+assert run('--renderer', 'bars', render_probe) == expected_logs
+capture = terminal_capture([render_probe], rows=8)
+frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)
+assert frames
+assert any(b'[#########---] 75% 3/4' in frame for frame in frames)
+assert any(b'[############] 100% 7/4' in frame for frame in frames)
+spinner_frames = set(re.findall(rb'unknown ([|/\\-]) 2 done', capture))
+assert len(spinner_frames) > 1, spinner_frames
+assert b'unsafe?[2J label' in capture and b'\x1b[2J' not in capture
+# Removing whole drawing transactions must leave the original log bytes.
+logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+assert logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
+assert capture.endswith(b'\x1b[J'), 'the final progress tree was not cleared'
+
+# Replay the cursor operations to check partial lines even when drawing scrolls.
+# This fixture uses ASCII and only the escape sequences emitted by our renderer.
+def replay_terminal(data, rows, cols):
+    screen = [[' '] * cols for _ in range(rows)]
+    history = []
+    row = col = 0
+    saved = (0, 0)
+
+    def down():
+        nonlocal row
+        row += 1
+        if row == rows:
+            history.append(''.join(screen.pop(0)).rstrip())
+            screen.append([' '] * cols)
+            row -= 1
+
+    index = 0
+    while index < len(data):
+        byte = data[index]
+        if byte == 27:
+            if data[index + 1] == ord('['):
+                match = re.match(rb'\x1b\[([?\d;]*)([A-Za-z])', data[index:])
+                assert match, data[index:index + 30]
+                param, command = match.groups()
+                if command == b'A':
+                    row = max(0, row - int(param or b'1'))
+                elif command == b'J':
+                    screen[row][col:] = [' '] * (cols - col)
+                    for line in range(row + 1, rows):
+                        screen[line] = [' '] * cols
+                else:
+                    assert (param, command) in [(b'?2026', b'h'), (b'?2026', b'l')]
+                index += len(match.group())
+                continue
+            command = data[index + 1]
+            if command == ord('D'):
+                down()
+            elif command == ord('7'):
+                saved = (row, col)
+            elif command == ord('8'):
+                row, col = saved
+            else:
+                raise AssertionError(f'unknown escape: {command}')
+            index += 2
+            continue
+        if byte == 13:
+            col = 0
+        elif byte == 10:
+            down()
+        else:
+            assert col < cols, 'renderer wrapped a line'
+            screen[row][col] = chr(byte)
+            col += 1
+        index += 1
+    return history + [''.join(line).rstrip() for line in screen]
+
+
+visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
+assert visible_logs == expected_logs.decode().splitlines(), visible_logs
+capture = terminal_capture([render_probe], stop_after=.55, code=130)
+assert b'75% 3/4' in capture and capture.endswith(b'\x1b[J')
+
+# A resize must constrain subsequent frames without a signal handler.
+capture = terminal_capture([render_probe], rows=12, cols=80, resize=(5, 24))
+frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', capture, re.S)
+assert frames
+last_lines = frames[-1].replace(b'\r', b'').split(b'\n')
+assert len(last_lines) <= 3 and all(len(line) < 24 for line in last_lines)
+for size in [(3, 8), (1, 1)]:
+    terminal_capture([render_probe], rows=size[0], cols=size[1])
+
+# Nesting still sends progress to the outer process, which owns the display.
+capture = terminal_capture([exe, render_probe])
+assert b'[#########---] 75% 3/4' in capture
+capture = terminal_capture(['--renderer', 'tree', render_probe])
+assert b'\x1b' in capture and b'render probe' in capture
+assert b'[#########---]' not in capture
+capture = terminal_capture([render_probe], extra_env={'NO_COLOR': '1'})
+assert b'[#########---] 75% 3/4' in capture
+for args, overrides in [(['--no-progress', render_probe], {}),
+                        ([render_probe], {'TERM': 'dumb'})]:
+    capture = terminal_capture(args, extra_env=overrides)
+    assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), (args, overrides, capture)
+print('custom renderer checks passed (including resize and partial log lines)')

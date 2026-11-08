@@ -13,11 +13,13 @@ Requires Zig 0.17.0 to build. Linux and macOS are supported.
 ```sh
 zig build
 ./zig-out/bin/zpg --name worker ./worker --flag value
+./zig-out/bin/zpg --renderer tree ./worker
 ./zig-out/bin/zpg --no-progress ./worker
 ```
 
-Use `zpg [--name TEXT] [--no-progress] <command> [args...]`. The name sets the
-progress node label and defaults to the command's basename. Flags after the
+Use `zpg [--name TEXT] [--renderer bars|tree] [--no-progress] <command> [args...]`.
+The name sets the progress node label and defaults to the command's basename.
+Flags after the
 command go to the child unchanged.
 Commands use normal PATH lookup; no shell is started. Use `--help` for usage.
 
@@ -28,9 +30,37 @@ as they arrive. Order is preserved within each stream. Output from the two
 streams can interleave, including within a line.
 
 Zig-aware children connect through the standard library's progress mechanism.
-The renderer redraws progress after logs scroll; it does not reserve a fixed
-footer. When stderr is redirected, logs remain plain text. `--no-progress`
-disables the progress tree.
+The default `bars` renderer shows a text bar, percentage, and item counts for
+each node with a known total. Nodes with an unknown total show a spinner
+and a completed count when available. For example:
+
+```text
+build [#########---] 75% 3/4
++- assets [############] 100% 2/2
+`- code [######------] 50% 1/2
+   `- compile /
+```
+
+Bars stop at 100% if the completed count exceeds the estimate. The item count
+still shows the reported value. Labels and tree depth are clipped to fit the
+terminal. Control bytes in progress labels are replaced with `?`; child log
+bytes pass through unchanged.
+
+Use `--renderer tree` for the standard Zig tree display. Use `just demo` to see
+the default renderer, or `./zig-out/bin/zpg --renderer tree --mock` for the
+standard display. The outermost `zpg` selects the renderer when commands are
+nested.
+
+The renderer clears the tree before each log write and redraws it after logs
+scroll. It does not reserve a fixed footer. When stderr is redirected, logs
+remain plain text. `--no-progress` or a terminal without ANSI support disables
+the progress tree. The bars renderer uses no colors, including when `NO_COLOR`
+is set.
+
+The custom renderer uses snapshots from the linked Zig standard library to
+keep child and grandchild progress collection unchanged. `src/progress.zig`
+connects that snapshot stream to `src/renderer.zig`, which formats the tree.
+The snapshot layout follows Zig 0.17.0 and must be checked when Zig is updated.
 
 `zpg` returns the child's exit code without adding a status message. A child
 killed by a signal returns `128 + signal`. CLI errors return 2; spawn or I/O

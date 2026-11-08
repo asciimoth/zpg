@@ -3,6 +3,7 @@ const cli = @import("cli.zig");
 const reader = @import("stream_reader.zig");
 const output = @import("output.zig");
 const signals = @import("signals.zig");
+const progress = @import("progress.zig");
 fn wait(io: std.Io, child: *std.process.Child, done: *std.atomic.Value(bool)) !std.process.Child.Term {
     defer done.store(true, .release);
     return child.wait(io);
@@ -11,11 +12,12 @@ pub fn run(io: std.Io, o: cli.Options) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
     const term = blk: {
-        const root = if (o.progress) std.Progress.start(io, .{
+        var display: progress.Progress = .{};
+        const root = try display.start(io, o.progress, o.renderer, .{
             .root_name = "zpg",
             .refresh_rate_ns = output.progress_refresh_rate,
-        }) else std.Progress.Node.none;
-        defer root.end();
+        });
+        defer display.end(io);
         const node = root.start(o.name, 0);
         defer node.end();
         var child = try std.process.spawn(io, .{ .argv = o.argv, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe, .progress_node = node, .pgid = 0 });

@@ -20,6 +20,15 @@ pub fn build(b: *std.Build) void {
     const unit = b.addRunArtifact(tests);
     const integration = b.addSystemCommand(&.{ "python3", "test/integration.py" });
     integration.addArtifactArg(exe);
+    const render_probe = b.addExecutable(.{
+        .name = "render-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/fixtures/render_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    integration.addArtifactArg(render_probe);
     const test_step = b.step("test", "Run unit and integration checks (requires Python 3)");
     test_step.dependOn(&unit.step);
     test_step.dependOn(&integration.step);

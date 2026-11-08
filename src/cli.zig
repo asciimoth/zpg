@@ -1,12 +1,14 @@
 const std = @import("std");
+pub const Renderer = enum { bars, tree };
 pub const Options = struct {
     name: []const u8 = "mock",
     progress: bool = true,
     mock: bool = false,
     help: bool = false,
+    renderer: Renderer = .bars,
     argv: []const []const u8 = &.{},
 };
-pub const usage = "Usage: zpg [--name TEXT] [--no-progress] <command> [args...]\n       zpg [--no-progress] --mock\n       zpg --help\n";
+pub const usage = "Usage: zpg [--name TEXT] [--renderer bars|tree] [--no-progress] <command> [args...]\n       zpg [--renderer bars|tree] [--no-progress] --mock\n       zpg --help\n";
 pub fn parse(args: []const []const u8) !Options {
     var o: Options = .{};
     var name: ?[]const u8 = null;
@@ -19,6 +21,10 @@ pub fn parse(args: []const []const u8) !Options {
             name = args[i];
         } else if (std.mem.eql(u8, a, "--no-progress")) {
             o.progress = false;
+        } else if (std.mem.eql(u8, a, "--renderer")) {
+            i += 1;
+            if (i == args.len) return error.MissingRenderer;
+            o.renderer = std.meta.stringToEnum(Renderer, args[i]) orelse return error.InvalidRenderer;
         } else if (std.mem.eql(u8, a, "--mock")) {
             o.mock = true;
         } else if (std.mem.eql(u8, a, "--help")) {
@@ -34,6 +40,15 @@ pub fn parse(args: []const []const u8) !Options {
     if (!o.mock and !o.help and o.argv.len == 0) return error.MissingCommand;
     o.name = name orelse if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
+}
+test "renderer selection only applies before the command" {
+    try std.testing.expectEqual(Renderer.bars, (try parse(&.{"true"})).renderer);
+    const o = try parse(&.{ "--renderer", "tree", "tool", "--renderer", "bars" });
+    try std.testing.expectEqual(Renderer.tree, o.renderer);
+    try std.testing.expectEqualStrings("--renderer", o.argv[1]);
+    try std.testing.expectEqual(@as(usize, 3), o.argv.len);
+    try std.testing.expectError(error.MissingRenderer, parse(&.{"--renderer"}));
+    try std.testing.expectError(error.InvalidRenderer, parse(&.{ "--renderer", "bad", "true" }));
 }
 test "leading flags and unchanged child arguments" {
     const o = try parse(&.{ "--name", "worker", "tool", "--help", "a b", "" });

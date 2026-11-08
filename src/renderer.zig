@@ -1,0 +1,218 @@
+const std = @import("std");
+
+// This is the packet layout emitted by the linked Zig standard library:
+// node count, little-endian counters and names, then one parent byte per node.
+const record_size = 8 + std.Progress.Node.max_name_len;
+const no_parent = 255;
+
+pub const Snapshot = struct {
+    bytes: []const u8,
+    count: usize,
+
+    pub fn init(bytes: []const u8) !Snapshot {
+        if (bytes.len == 0 or bytes[0] == 0 or bytes[0] >= 254 or
+            bytes.len != 1 + @as(usize, bytes[0]) * (record_size + 1))
+            return error.InvalidProgressPacket;
+        return .{ .bytes = bytes, .count = bytes[0] };
+    }
+
+    fn parent(self: Snapshot, index: usize) u8 {
+        return self.bytes[1 + self.count * record_size + index];
+    }
+
+    fn record(self: Snapshot, index: usize) []const u8 {
+        return self.bytes[1 + index * record_size ..][0..record_size];
+    }
+
+    fn hasSibling(self: Snapshot, index: usize) bool {
+        for (index + 1..self.count) |other| {
+            if (self.parent(other) == self.parent(index)) return true;
+        }
+        return false;
+    }
+};
+
+pub fn packetSize(count: u8) usize {
+    return 1 + @as(usize, count) * (record_size + 1);
+}
+
+// Use a conservative two-cell width for non-ASCII codepoints. This keeps names
+// intact without a dependency on a terminal-specific Unicode width table.
+fn clipped(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
+    var index: usize = 0;
+    var cells: usize = 0;
+    while (index < text.len and cells < width) {
+        const byte = text[index];
+        if (byte < 128) {
+            try writer.writeByte(if (byte >= 32 and byte != 127) byte else '?');
+            index += 1;
+            cells += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+        const end = index + len;
+        const codepoint = if (len > 1 and end <= text.len)
+            std.unicode.utf8Decode(text[index..end]) catch 0
+        else
+            0;
+        if (codepoint < 160) {
+            try writer.writeByte('?');
+            index += 1;
+            cells += 1;
+        } else {
+            if (cells + 2 > width) break;
+            try writer.writeAll(text[index..end]);
+            index = end;
+            cells += 2;
+        }
+    }
+}
+
+fn counter(writer: *std.Io.Writer, completed: u32, total: u32, tick: usize) !void {
+    const bar_width = 12;
+    if (total == 0 or total == std.math.maxInt(u32)) {
+        const spinner = "|/-\\";
+        try writer.print(" {c}", .{spinner[tick % spinner.len]});
+        if (total == 0 and completed != 0) try writer.print(" {d} done", .{completed});
+    } else {
+        try writer.writeAll(" [");
+        const value: u64 = @min(completed, total);
+        const filled = value * bar_width / total;
+        try writer.splatByteAll('#', filled);
+        try writer.splatByteAll('-', bar_width - filled);
+        try writer.print("] {d}% {d}/{d}", .{ value * 100 / total, completed, total });
+    }
+}
+
+const Frame = struct {
+    writer: *std.Io.Writer,
+    snapshot: Snapshot,
+    width: usize,
+    limit: usize,
+    tick: usize,
+    lines: usize = 0,
+    visited: [254]bool = @splat(false),
+    branches: [254]bool = @splat(false),
+
+    fn node(self: *Frame, index: usize, depth: usize) std.Io.Writer.Error!void {
+        if (self.lines == self.limit or self.visited[index]) return;
+        self.visited[index] = true;
+        const record = self.snapshot.record(index);
+        const name = std.mem.sliceTo(record[8..], 0);
+        const completed = std.mem.readInt(u32, record[0..4], .little);
+        const total = std.mem.readInt(u32, record[4..8], .little);
+        var suffix_buffer: [96]u8 = undefined;
+        var suffix = std.Io.Writer.fixed(&suffix_buffer);
+        try counter(&suffix, completed, total, self.tick);
+        var line_buffer: [1024]u8 = undefined;
+        var line = std.Io.Writer.fixed(&line_buffer);
+        if (depth != 0) {
+            for (0..depth - 1) |ancestor| {
+                try line.writeAll(if (self.branches[ancestor]) "|  " else "   ");
+            }
+            try line.writeAll(if (self.snapshot.hasSibling(index)) "+- " else "`- ");
+        }
+        const name_width = @max(8, self.width -| (line.end + suffix.end));
+        try clipped(&line, name, name_width);
+        try line.writeAll(suffix.buffered());
+        if (self.lines != 0) try self.writer.writeAll("\r\n");
+        try clipped(self.writer, line.buffered(), self.width);
+        self.lines += 1;
+        if (depth != 0) self.branches[depth - 1] = self.snapshot.hasSibling(index);
+        for (0..self.snapshot.count) |child| {
+            if (self.snapshot.parent(child) == index) try self.node(child, depth + 1);
+            if (self.lines == self.limit) break;
+        }
+    }
+};
+
+/// The frame contains printable labels and CRLF separators, without cursor codes.
+pub fn render(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize) !usize {
+    var frame: Frame = .{
+        .writer = writer,
+        .snapshot = snapshot,
+        .width = @min(cols -| 1, 512),
+        .limit = @min(rows -| 2, snapshot.count),
+        .tick = tick,
+    };
+    if (frame.width == 0 or frame.limit == 0) return 0;
+    // Only the first node is the root. Detached or cyclic nodes are omitted.
+    if (snapshot.parent(0) == no_parent) try frame.node(0, 0);
+    return frame.lines;
+}
+
+fn testPacket(buffer: []u8, parents: []const u8, names: []const []const u8) []u8 {
+    const bytes = buffer[0..packetSize(@intCast(parents.len))];
+    @memset(bytes, 0);
+    bytes[0] = @intCast(parents.len);
+    for (names, 0..) |name, index| {
+        @memcpy(bytes[1 + index * record_size + 8 ..][0..name.len], name);
+    }
+    @memcpy(bytes[1 + parents.len * record_size ..], parents);
+    return bytes;
+}
+
+test "bars clamp estimates and distinguish unknown totals" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try counter(&writer, 3, 4, 0);
+    try std.testing.expectEqualStrings(" [#########---] 75% 3/4", writer.buffered());
+    writer.end = 0;
+    try counter(&writer, 9, 4, 0);
+    try std.testing.expectEqualStrings(" [############] 100% 9/4", writer.buffered());
+    writer.end = 0;
+    try counter(&writer, 4, 0, 2);
+    try std.testing.expectEqualStrings(" - 4 done", writer.buffered());
+    writer.end = 0;
+    try counter(&writer, std.math.maxInt(u32), std.math.maxInt(u32) - 1, 0);
+    try std.testing.expect(std.mem.find(u8, writer.buffered(), "100%") != null);
+}
+
+test "tree follows parents even when children precede them" {
+    var packet: [1024]u8 = undefined;
+    const snapshot = try Snapshot.init(testPacket(&packet, &.{ 255, 3, 0, 0 }, &.{ "root", "leaf", "first", "second" }));
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectEqual(@as(usize, 4), try render(&writer, snapshot, 80, 24, 0));
+    try std.testing.expectEqualStrings(
+        "root |\r\n+- first |\r\n`- second |\r\n   `- leaf |",
+        writer.buffered(),
+    );
+}
+
+test "small terminals and unsafe names stay within bounds" {
+    var packet: [1024]u8 = undefined;
+    const snapshot = try Snapshot.init(testPacket(&packet, &.{ 255, 0, 1 }, &.{ "root\x1b[2J", "child\nline", "leaf" }));
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectEqual(@as(usize, 2), try render(&writer, snapshot, 10, 4, 0));
+    try std.testing.expect(std.mem.findScalar(u8, writer.buffered(), 27) == null);
+    var lines = std.mem.splitSequence(u8, writer.buffered(), "\r\n");
+    while (lines.next()) |line| try std.testing.expect(line.len <= 9);
+    writer.end = 0;
+    try std.testing.expectEqual(@as(usize, 0), try render(&writer, snapshot, 1, 1, 0));
+    try std.testing.expectEqual(@as(usize, 0), writer.end);
+}
+
+test "invalid packets and detached cycles cannot escape the tree" {
+    try std.testing.expectError(error.InvalidProgressPacket, Snapshot.init(&.{}));
+    try std.testing.expectError(error.InvalidProgressPacket, Snapshot.init(&.{ 1, 0 }));
+    var packet: [1024]u8 = undefined;
+    const snapshot = try Snapshot.init(testPacket(&packet, &.{ 255, 2, 1, 99 }, &.{ "root", "cycle", "cycle", "orphan" }));
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectEqual(@as(usize, 1), try render(&writer, snapshot, 80, 24, 0));
+}
+
+test "Unicode names remain whole and invalid bytes are replaced" {
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try clipped(&writer, "café \xe7\x95\x8c", 6);
+    try std.testing.expectEqualStrings("café ", writer.buffered());
+    writer.end = 0;
+    try clipped(&writer, "bad\xe2\x82\xff\x1b", 80);
+    try std.testing.expectEqualStrings("bad????", writer.buffered());
+    writer.end = 0;
+    try clipped(&writer, "short\xe2\x82", 80);
+    try std.testing.expectEqualStrings("short??", writer.buffered());
+}

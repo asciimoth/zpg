@@ -12,6 +12,6 @@ jobs:
         with:
           version: 0.17.0
       - run: zig version
-      - run: zig fmt --check build.zig src test/fixtures/probe.zig
+      - run: zig fmt --check build.zig src test/fixtures
       - run: zig build
       - run: zig build test

@@ -2,6 +2,8 @@ const std = @import("std");
 const output = @import("output.zig");
 const signals = @import("signals.zig");
 const reader = @import("stream_reader.zig");
+const cli = @import("cli.zig");
+const progress_display = @import("progress.zig");
 
 // A fixed seed makes the demo repeatable. The tree shape and task times still vary.
 const seed = 0x7a70672d6d6f636b;
@@ -237,16 +239,17 @@ pub fn runWorker(io: std.Io, kind: []const u8) !u8 {
     return 0;
 }
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, progress: bool) !u8 {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, progress: bool, style: cli.Renderer) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
     const exe = try std.process.executablePathAlloc(io, allocator);
-    const root = if (progress) std.Progress.start(io, .{
+    var display: progress_display.Progress = .{};
+    const root = try display.start(io, progress, style, .{
         .root_name = "mock",
         .estimated_total_items = 6,
         .refresh_rate_ns = output.progress_refresh_rate,
-    }) else std.Progress.Node.none;
-    defer root.end();
+    });
+    defer display.end(io);
 
     const indexer_node = root.start("indexer", 0);
     defer indexer_node.end();

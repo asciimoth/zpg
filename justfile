@@ -7,13 +7,16 @@ demo:
     zig build
     PATH="./zig-out/bin:$PATH" zpg zpg --mock
 
-check:
-    zig fmt --check build.zig src test/fixtures/probe.zig
+check: typos
+    zig fmt --check build.zig src test/fixtures
     zig build
     zig build test
 
+typos:
+    typos
+
 fmt:
-    zig fmt build.zig src test/fixtures/probe.zig
+    zig fmt build.zig src test/fixtures
     nixfmt flake.nix
     just --fmt
 
