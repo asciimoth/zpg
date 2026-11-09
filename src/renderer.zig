@@ -1,5 +1,6 @@
 const std = @import("std");
 const styles = @import("style.zig");
+const cli = @import("cli.zig");
 
 // This is the packet layout emitted by the linked Zig standard library:
 // node count, little-endian counters and names, then one parent byte per node.
@@ -99,6 +100,7 @@ const Frame = struct {
     limit: usize,
     tick: usize,
     style: styles.Style,
+    mode: cli.Renderer = .bars,
     lines: usize = 0,
     visited: [254]bool = @splat(false),
     branches: [254]bool = @splat(false),
@@ -112,7 +114,7 @@ const Frame = struct {
         const total = std.mem.readInt(u32, record[4..8], .little);
         var suffix_buffer: [96]u8 = undefined;
         var suffix = std.Io.Writer.fixed(&suffix_buffer);
-        try counter(&suffix, completed, total, self.tick, self.style);
+        if (self.mode == .bars) try counter(&suffix, completed, total, self.tick, self.style);
         var line_buffer: [2048]u8 = undefined;
         var line = std.Io.Writer.fixed(&line_buffer);
         if (depth != 0) {
@@ -120,6 +122,13 @@ const Frame = struct {
                 try line.writeAll(if (self.branches[ancestor]) "│  " else "   ");
             }
             try line.writeAll(if (self.snapshot.hasSibling(index)) "├─ " else "└─ ");
+        }
+        if (self.mode == .tree) {
+            if (total != 0 and total != std.math.maxInt(u32)) {
+                try line.print("[{d}/{d}] ", .{ completed, total });
+            } else if (completed != 0) {
+                try line.print("[{d}] ", .{completed});
+            }
         }
         const name_width = @max(8, self.width -| (styles.text_width(line.buffered()) + styles.text_width(suffix.buffered())));
         try clipped(&line, name, name_width);
@@ -137,7 +146,12 @@ const Frame = struct {
 
 /// The frame contains printable labels and CRLF separators, without cursor codes.
 pub fn render(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize, style: styles.Style) !usize {
+    return renderMode(writer, snapshot, cols, rows, tick, style, .bars);
+}
+
+pub fn renderMode(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize, style: styles.Style, mode: cli.Renderer) !usize {
     var frame: Frame = .{
+        .mode = mode,
         .writer = writer,
         .snapshot = snapshot,
         .width = @min(cols -| 1, 512),
@@ -335,4 +349,16 @@ test "Unicode names remain whole and invalid bytes are replaced" {
     writer.end = 0;
     try clipped(&writer, "safe\u{202e}label\u{2066}\u{200b}", 80);
     try std.testing.expectEqualStrings("safe?label??", writer.buffered());
+}
+
+test "plain tree counters use the shared clipped frame" {
+    var packet: [1024]u8 = undefined;
+    const bytes = testPacket(&packet, &.{ 255, 0 }, &.{ "build", "files" });
+    std.mem.writeInt(u32, bytes[1..5], 1, .little);
+    std.mem.writeInt(u32, bytes[5..9], 2, .little);
+    const snapshot = try Snapshot.init(bytes);
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectEqual(@as(usize, 2), try renderMode(&writer, snapshot, 80, 24, 0, .{}, .tree));
+    try std.testing.expectEqualStrings("[1/2] build\r\n└─ files", writer.buffered());
 }

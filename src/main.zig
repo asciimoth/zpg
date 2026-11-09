@@ -31,6 +31,7 @@ fn run(init: std.process.Init) !u8 {
 }
 test {
     _ = cli;
+    _ = output;
     _ = @import("progress.zig");
     _ = @import("supervisor.zig");
 }

@@ -30,8 +30,10 @@ zpg --mock
 `--mock` runs a fixed progress demo when stdin is empty. With piped or
 redirected input, it echoes each line with a short delay and shows input
 progress. In the fixed demo, stdout logs are green when stdout is a terminal,
-and stderr logs are red when stderr is a terminal. It also prints a final line
-that has no newline:
+and stderr logs are red when stderr is a terminal. At the end, terminal stdout
+shows a bar updated with `\r`, and terminal stderr shows a two-row footer
+updated with cursor movement. Try `zpg zpg --mock` to check nested output.
+Input echo also preserves a final line that has no newline:
 
 ```sh
 printf 'one\ntwo\n' | zpg --mock
@@ -56,9 +58,10 @@ build [#########---] 75% 3/4
 ```
 
 Use `--name TEXT` to set the task label. The default is the command's basename.
-Use `--renderer tree` for the standard Zig tree display. Use `--no-progress`
-to hide progress. By default, progress uses stderr if it is a terminal, or
-stdout if only stdout is a terminal. If neither is a terminal, progress is hidden.
+Use `--renderer tree` for a plain tree with Zig progress counters.
+Use `--no-progress` to hide progress. By default, progress uses stderr if it is
+a terminal, or stdout if only stdout is a terminal. If neither is a terminal,
+progress is hidden.
 Use `--progress-stream stdout` or `--progress-stream stderr` to select one
 explicitly. The selected stream must be a terminal that supports ANSI escapes.
 Use `--progress-stream auto` to select the default behavior.
@@ -151,10 +154,24 @@ Each command output stream gets a separate pseudo-terminal when the matching
 normal TTY checks to enable colored logs. This also works with `--no-progress`
 and nested `zpg` commands. `--no-progress` also hides progress in nested `zpg`
 commands.
-Other programs can still emit their own progress or terminal controls.
+
+Programs can update a line with `\r` or draw a small footer with relative
+cursor movement. `zpg` tracks carriage returns, line feeds, backspace, tabs,
+relative cursor movement (`CSI A/B/C/D/E/F`), column selection (`CSI G`),
+line erasure (`CSI K`), erasure to the end of the screen (`CSI J`), and cursor
+save/restore (`ESC 7/8`, `CSI s/u`).
+Its progress display stays below the rows used by the command. It waits while
+a control sequence, UTF-8 character, or saved-cursor operation is incomplete.
+It hides progress if there is not enough space below the command output.
+After a cursor save, it also avoids scrolling that could change the saved screen
+position, even after a restore. Progress can stay hidden until there is enough
+known space to draw without scrolling.
+Both renderers use this behavior. Child stdout and stderr bytes stay unchanged.
+
 The pseudo-terminals use the initial size of their matching terminals, with
-output conversion disabled. `zpg` forwards the bytes without interpreting
-terminal escape sequences.
+output conversion disabled. This is basic output support: absolute screen
+positioning, scroll regions, alternate screens, and other complex terminal
+operations are not supported.
 
 When stdin is a terminal, the command receives an empty stdin instead.
 `zpg` does not support interactive commands or full-screen applications.

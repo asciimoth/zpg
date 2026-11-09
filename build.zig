@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.link_libc = true;
     exe.root_module.addCSourceFile(.{ .file = b.path("src/spawn.c") });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/terminal.c") });
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
@@ -31,9 +32,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     integration.addArtifactArg(render_probe);
+    const terminal_tests = b.addSystemCommand(&.{ "python3", "test/terminal_output.py" });
+    terminal_tests.addArtifactArg(exe);
     const test_step = b.step("test", "Run unit and integration checks (requires Python 3)");
     test_step.dependOn(&unit.step);
     test_step.dependOn(&integration.step);
+    test_step.dependOn(&terminal_tests.step);
 
     const run_step = b.step("run", "Run zpg");
     run_step.dependOn(&run.step);

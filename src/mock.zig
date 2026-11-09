@@ -150,6 +150,35 @@ fn demonstrate(io: std.Io, colors: Colors, random: std.Random, root: std.Progres
     }
 }
 
+// Keep these examples separate from worker logs so each update owns its rows.
+fn demonstrateTerminal(io: std.Io, colors: Colors, root: std.Progress.Node) !void {
+    const task = root.start("terminal output", @intFromBool(colors.stdout) + @as(usize, @intFromBool(colors.stderr)));
+    defer task.end();
+    if (colors.stdout) {
+        for ([_][]const u8{
+            "\r\x1b[2K\x1b[32mmock carriage return: [----] 0%\x1b[0m",
+            "\r\x1b[2K\x1b[32mmock carriage return: [##--] 50%\x1b[0m",
+            "\r\x1b[2K\x1b[32mmock carriage return: [####] 100%\x1b[0m",
+        }) |bytes| {
+            try output.writeStdout(io, bytes);
+            try io.sleep(.fromMilliseconds(60), .awake);
+        }
+        try output.writeStdout(io, "\n");
+        task.completeOne();
+    }
+    if (colors.stderr) {
+        // Leave the cursor above the footer between updates, as a small
+        // progress display can do. Both rows must survive zpg's redraws.
+        try output.print(io, "\x1b[31mmock footer: waiting\r\nmock footer items: 0/2\x1b[0m\r\x1b[A", .{});
+        try io.sleep(.fromMilliseconds(60), .awake);
+        try output.print(io, "\r\x1b[2K\x1b[31mmock footer: running\r\n\x1b[2Kmock footer items: 1/2\x1b[0m\r\x1b[A", .{});
+        try io.sleep(.fromMilliseconds(60), .awake);
+        try output.print(io, "\r\x1b[2K\x1b[31mmock footer: complete\r\n\x1b[2Kmock footer items: 2/2\x1b[0m\r\n", .{});
+        task.completeOne();
+        try io.sleep(.fromMilliseconds(60), .awake);
+    }
+}
+
 fn emitInputLine(io: std.Io, line: []const u8, node: std.Progress.Node) !void {
     if (signals.get() != 0) return error.Interrupted;
     try output.writeStdout(io, line);
@@ -353,7 +382,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     var display: progress_display.Progress = .{};
     const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
         .root_name = "mock",
-        .estimated_total_items = 6,
+        .estimated_total_items = 7,
         .refresh_rate_ns = output.progress_refresh_rate,
     });
     defer display.end(io);
@@ -406,6 +435,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
         const code = statusCode(term);
         if (code != 0) return code;
     }
+    try demonstrateTerminal(io, colors, root);
+    if (signals.get() != 0) return @intCast(128 + signals.get());
     try colors.writeStdout(io, "mock stdout: complete\n");
     try colors.printStderr(io, "mock stderr: complete\n", .{});
     return 0;

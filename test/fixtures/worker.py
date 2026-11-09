@@ -110,3 +110,27 @@ elif mode == 'test-progress':
         os.write(fd, b'\x00')
     os.write(1, b'child stdout\x00')
     os.write(2, b'child stderr\n')
+elif mode == 'controls':
+    import struct
+    fd = int(sys.argv[2])
+    if 'ZIG_PROGRESS' in os.environ:
+        os.write(int(os.environ['ZIG_PROGRESS']),
+                 struct.pack('<BII120sB', 1, 1, 2, b'control progress', 255))
+    # Fill a small terminal before drawing, so zpg must also scroll its overlay.
+    os.write(fd, b'log\n' * 10)
+    time.sleep(.3)
+    for chunk in [
+        b'abcdefghij\rXY',
+        b'\r\x1b[2Kbar 100%\n',
+        b'footer old\nitems 0/2\r\x1b[A',
+        b'\x1b[',  # Force a display tick inside an incomplete CSI sequence.
+        b'2Kfooter done\x1b[B\r\x1b[2Kitems 2/2\x1b[A\r',
+        b'\x1b[B\r\nsaved: \x1b7\nscratch',
+        b'\r\x1b[2K\x1b8restored\n',
+        b'backspacX\be\tend\n',
+        b'\x1b[32mwide: \xe7',  # Split a UTF-8 character as well.
+        b'\x95\x8c\x1b[0m',
+        ' complete café e\u0301\n'.encode(),
+    ]:
+        os.write(fd, chunk)
+        time.sleep(.08)

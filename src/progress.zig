@@ -8,33 +8,6 @@ const styles = @import("style.zig");
 // while all callbacks keep the original I/O userdata.
 var local_parent: std.Io.File = undefined;
 var terminal: std.Io.File = undefined;
-var original_io: std.Io = undefined;
-var tree_writer: std.Io.File.Writer = undefined;
-
-// std.Progress renders through its stderr callbacks. Redirect only its I/O
-// view; the child's stdout/stderr and application diagnostics keep their fds.
-fn tree_lock(userdata: ?*anyopaque, mode: ?std.Io.Terminal.Mode) std.Io.Cancelable!std.Io.LockedStderr {
-    _ = try original_io.vtable.lockStderr(userdata, mode);
-    tree_writer = .initStreaming(terminal, original_io, &.{});
-    return .{ .file_writer = &tree_writer, .terminal_mode = .escape_codes };
-}
-
-fn tree_try_lock(userdata: ?*anyopaque, mode: ?std.Io.Terminal.Mode) std.Io.Cancelable!?std.Io.LockedStderr {
-    _ = (try original_io.vtable.tryLockStderr(userdata, mode)) orelse return null;
-    tree_writer = .initStreaming(terminal, original_io, &.{});
-    return .{ .file_writer = &tree_writer, .terminal_mode = .escape_codes };
-}
-
-fn tree_enable_ansi(_: ?*anyopaque, _: std.Io.File) std.Io.File.EnableAnsiEscapeCodesError!void {
-    return terminal.enableAnsiEscapeCodes(original_io);
-}
-
-fn tree_operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-    var redirected = operation;
-    if (redirected == .device_io_control and redirected.device_io_control.file.handle == std.Io.File.stderr().handle)
-        redirected.device_io_control.file = terminal;
-    return original_io.vtable.operate(userdata, redirected);
-}
 
 fn parentFile(_: ?*anyopaque) std.Progress.ParentFileError!std.Io.File {
     return local_parent;
@@ -56,20 +29,13 @@ pub const Progress = struct {
             return self.root;
         }
         terminal = (try output.configure(io, stream)) orelse return .none;
+        // Both renderers send plain frames through output.draw so the same
+        // cursor tracking protects child output in either display mode.
         self.vtable = io.vtable.*;
-        if (mode == .tree) {
-            original_io = io;
-            self.vtable.lockStderr = tree_lock;
-            self.vtable.tryLockStderr = tree_try_lock;
-            self.vtable.fileEnableAnsiEscapeCodes = tree_enable_ansi;
-            self.vtable.operate = tree_operate;
-            self.root = std.Progress.start(.{ .userdata = io.userdata, .vtable = &self.vtable }, options);
-            return self.root;
-        }
         const handles = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
         const pipe: [2]std.Io.File = .{ .{ .handle = handles[0], .flags = .{ .nonblocking = false } }, .{ .handle = handles[1], .flags = .{ .nonblocking = false } } };
         errdefer for (pipe) |file| file.close(io);
-        self.worker = try io.concurrent(receive, .{ io, pipe[0], style });
+        self.worker = try io.concurrent(receive, .{ io, pipe[0], style, mode });
         self.pipe = pipe;
         local_parent = pipe[1];
         self.vtable.progressParentFile = parentFile;
@@ -98,7 +64,7 @@ fn readAll(io: std.Io, file: std.Io.File, bytes: []u8) !void {
     }
 }
 
-fn receive(io: std.Io, file: std.Io.File, style: styles.Style) void {
+fn receive(io: std.Io, file: std.Io.File, style: styles.Style, mode: cli.Renderer) void {
     var packet: [std.Progress.max_packet_len]u8 = undefined;
     var frame_buffer: [131072]u8 = undefined;
     var tick: usize = 0;
@@ -115,10 +81,10 @@ fn receive(io: std.Io, file: std.Io.File, style: styles.Style) void {
             .arg = &size,
         } }) catch return;
         var frame = std.Io.Writer.fixed(&frame_buffer);
-        const lines = renderer.render(&frame, snapshot, size.col, size.row, tick / 5, style) catch continue;
+        const lines = renderer.renderMode(&frame, snapshot, size.col, size.row, tick / 5, style, mode) catch continue;
         // A failed display must not stop draining the progress pipe and block
         // the stdlib collector. The log writer reports output errors separately.
-        output.draw(io, frame.buffered(), lines) catch {};
+        output.draw(io, frame.buffered(), lines, size.col, size.row) catch {};
     }
 }
 

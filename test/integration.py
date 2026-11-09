@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from terminal_model import Terminal
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
 render_probe = str(pathlib.Path(sys.argv[2]).resolve())
@@ -336,6 +337,11 @@ assert b'\x1b[32mmock stdout:' in log and b'\x1b[31mmock stderr:' in log, log
 print('integration checks passed (including terminal progress)')
 
 
+def progress_cleared(capture):
+    return re.search(rb'\x1b\[\?2026h\x1b\[\d+B\r\x1b\[J'
+                     rb'\x1b\[\d+A\x1b\[\d+G\x1b\[\?2026l$', capture) is not None
+
+
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
                      stop_after=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL):
     master, slave = pty.openpty()
@@ -435,7 +441,7 @@ if sys.platform.startswith('linux'):
             last_known = capture.rfind(b'75% 768/1024')
             assert b'I/O estimate (unknown)' in capture[last_known:], capture
             logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
-            assert logs.replace(b'\x1b[J', b'') == b'copy step\r\n' * 2, logs
+            assert logs == b'copy step\r\n' * 2, logs
         capture = terminal_capture(['--guess', '--renderer', 'tree', *args])
         assert b'I/O estimate (bytes): input.bin' in capture, capture
         capture = terminal_capture(['--guess', '--no-progress', *args])
@@ -445,13 +451,13 @@ if sys.platform.startswith('linux'):
                                     'output-only', str(source) + '.out'])
         assert b'I/O estimate (unknown)' in capture and b'100%' not in capture, capture
         capture = terminal_capture(['--guess', *args], stop_after=.8, code=130)
-        assert b'25% 256/1024' in capture and capture.endswith(b'\x1b[J'), capture
+        assert b'25% 256/1024' in capture and progress_cleared(capture), capture
         # Descriptors can close after a proc entry opens. Such races must not
         # add diagnostics or debug stack traces to the command's log.
         capture = terminal_capture(['--guess', sys.executable, fixture,
                                     'file-churn', str(source)])
         logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
-        assert logs.replace(b'\x1b[J', b'') == b'churn complete\r\n', logs
+        assert logs == b'churn complete\r\n', logs
         # File names must not inject terminal controls in either renderer.
         unusual = pathlib.Path(directory) / 'line\n\x1b[2Jé.bin'
         unusual.write_bytes(b'x' * 1024)
@@ -524,8 +530,8 @@ assert b'unsafe?[2J label?' in capture
 assert b'\x1b[2J' not in capture and '\u202e'.encode() not in capture
 # Removing whole drawing transactions must leave the original log bytes.
 logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
-assert logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
-assert capture.endswith(b'\x1b[J'), 'the final progress tree was not cleared'
+assert logs == expected_logs.replace(b'\n', b'\r\n')
+assert progress_cleared(capture), 'the final progress tree was not cleared'
 
 # Custom Unicode styles must preserve log bytes and render complete codepoints.
 custom_args = ['--bar-style', 'block', '--spinner-style', '⠋⠙']
@@ -536,13 +542,13 @@ assert ('█' * 12 + ' 100% 7/4').encode() in custom_capture
 assert 'unknown ⠋ 2 done'.encode() in custom_capture
 assert 'unknown ⠙ 2 done'.encode() in custom_capture
 custom_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', custom_capture, flags=re.S)
-assert custom_logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
+assert custom_logs == expected_logs.replace(b'\n', b'\r\n')
 custom_capture.decode('utf-8')
 custom_capture = terminal_capture(['--bar-style', '(▓░)', '--spinner-style', 'ab', render_probe])
 assert ('(' + '▓' * 9 + '░' * 3 + ') 75% 3/4').encode() in custom_capture
 assert b'unknown a 2 done' in custom_capture and b'unknown b 2 done' in custom_capture
 custom_capture = terminal_capture([*custom_args, render_probe], cols=24)
-custom_frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', custom_capture, re.S)
+custom_frames = re.findall(rb'\x1b\[\d+A\x1b\[\d+B\r(.*?)\x1b\[\d+A\x1b\[\d+G', custom_capture, re.S)
 assert custom_frames
 for frame in custom_frames:
     assert all(len(line) < 24 for line in frame.decode().replace('\r', '').split('\n'))
@@ -560,7 +566,7 @@ for args, overrides in [([render_probe], fira_env),
     fira_frames = set(re.findall('unknown ([\uee06-\uee0b]) 2 done', fira_capture.decode()))
     assert len(fira_frames) > 1, fira_frames
     fira_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', fira_capture, flags=re.S)
-    assert fira_logs.replace(b'\x1b[J', b'') == expected_logs.replace(b'\n', b'\r\n')
+    assert fira_logs == expected_logs.replace(b'\n', b'\r\n')
 fira_capture = terminal_capture(['--bar-style', 'ascii', render_probe], extra_env=fira_env)
 assert b'[#########---] 75% 3/4' in fira_capture
 assert re.search('unknown [\uee06-\uee0b] 2 done', fira_capture.decode())
@@ -574,71 +580,23 @@ assert not re.search('[\uee00-\uee0b]', fira_capture.decode())
 fira_capture = terminal_capture([render_probe], extra_env={'UNICODE_PROGRESS_BAR': 'false'})
 assert b'[#########---] 75% 3/4' in fira_capture
 
-# Replay the cursor operations to check partial lines even when drawing scrolls.
-# This fixture uses ASCII and only the escape sequences emitted by our renderer.
-def replay_terminal(data, rows, cols):
-    screen = [[' '] * cols for _ in range(rows)]
-    history = []
-    row = col = 0
-    saved = (0, 0)
-
-    def down():
-        nonlocal row
-        row += 1
-        if row == rows:
-            history.append(''.join(screen.pop(0)).rstrip())
-            screen.append([' '] * cols)
-            row -= 1
-
-    index = 0
-    while index < len(data):
-        byte = data[index]
-        if byte == 27:
-            if data[index + 1] == ord('['):
-                match = re.match(rb'\x1b\[([?\d;]*)([A-Za-z])', data[index:])
-                assert match, data[index:index + 30]
-                param, command = match.groups()
-                if command == b'A':
-                    row = max(0, row - int(param or b'1'))
-                elif command == b'J':
-                    screen[row][col:] = [' '] * (cols - col)
-                    for line in range(row + 1, rows):
-                        screen[line] = [' '] * cols
-                else:
-                    assert (param, command) in [(b'?2026', b'h'), (b'?2026', b'l')]
-                index += len(match.group())
-                continue
-            command = data[index + 1]
-            if command == ord('D'):
-                down()
-            elif command == ord('7'):
-                saved = (row, col)
-            elif command == ord('8'):
-                row, col = saved
-            else:
-                raise AssertionError(f'unknown escape: {command}')
-            index += 2
-            continue
-        if byte == 13:
-            col = 0
-        elif byte == 10:
-            down()
-        else:
-            assert col < cols, 'renderer wrapped a line'
-            screen[row][col] = chr(byte)
-            col += 1
-        index += 1
-    return history + [''.join(line).rstrip() for line in screen]
+# The same independent screen model is used by the focused terminal suite.
+def replay_terminal(data, rows, cols, snapshots=None):
+    terminal = Terminal(rows, cols)
+    terminal.feed(data)
+    if snapshots is not None:
+        snapshots.extend(terminal.snapshots)
+    return terminal.lines()
 
 
 visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
 assert visible_logs == expected_logs.decode().splitlines(), visible_logs
 capture = terminal_capture([render_probe], stop_after=.55, code=130)
-assert b'75% 3/4' in capture and capture.endswith(b'\x1b[J')
+assert b'75% 3/4' in capture and progress_cleared(capture)
 
 # A resize must constrain subsequent frames without a signal handler.
 capture = terminal_capture([render_probe], rows=12, cols=80, resize=(5, 24))
-frames = re.findall(rb'\x1b7[\r\n]+(.*?)\x1b8', capture, re.S)
+frames = re.findall(rb'\x1b\[\d+A\x1b\[\d+B\r(.*?)\x1b\[\d+A\x1b\[\d+G', capture, re.S)
 assert frames
 # Each fixture glyph uses one column, including the Unicode tree branches.
 last_lines = frames[-1].decode().replace('\r', '').split('\n')
@@ -669,6 +627,44 @@ for args in [['--no-progress', render_probe],
     assert b'unsafe\x1b[2J label' in capture, capture
 capture = terminal_capture([render_probe], extra_env={'TERM': 'dumb'})
 assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), capture
+# Replay both renderers with child row updates, including split sequences and
+# saved cursors. Inspect intermediate frames, not only the final byte stream.
+control_expected = ['log'] * 10 + [
+    'bar 100%', 'footer done', 'items 2/2', 'saved: restored',
+    'backspace       end', 'wide: 界 complete café e\u0301',
+]
+for renderer in ('bars', 'tree'):
+    for prefix in ([], [exe]):
+        for fd in ('1', '2'):
+            snapshots = []
+            control_capture = terminal_capture(['--renderer', renderer, *prefix,
+                                                 sys.executable, fixture, 'controls', fd], rows=8)
+            visible = [line for line in replay_terminal(control_capture, 8, 80, snapshots) if line]
+            assert visible == control_expected, visible
+            assert any('XYcdefghij' in frame for frame in snapshots), snapshots
+            footer_frames = [frame for frame in snapshots
+                             if 'footer old' in frame and 'items 0/2' in frame]
+            assert footer_frames, snapshots
+            assert any(any('control progress' in line for line in frame) for frame in footer_frames)
+            # After removing zpg's drawing, all child control bytes must remain.
+            raw = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', control_capture, flags=re.S)
+            direct = run('--no-progress', sys.executable, fixture, 'controls', fd,
+                         stream='stdout' if fd == '1' else 'stderr')
+            assert raw == direct.replace(b'\n', b'\r\n'), (raw, direct)
+
+# The mock exercises both methods itself and through a nested supervisor.
+for prefix in ([], [exe]):
+    mock_capture = terminal_capture([*prefix, '--mock'], rows=24, cols=100)
+    mock_visible = [line for line in replay_terminal(mock_capture, 24, 100) if line]
+    # The two capture PTYs can deliver their final lines in either order.
+    assert sorted(mock_visible[-5:]) == sorted([
+        'mock carriage return: [####] 100%',
+        'mock footer: complete', 'mock footer items: 2/2',
+        'mock stdout: complete', 'mock stderr: complete',
+    ]), mock_visible[-10:]
+    assert 'mock footer: waiting' not in mock_visible
+    assert 'mock footer: running' not in mock_visible
+
 print('custom renderer checks passed (including resize and partial log lines)')
 
 
@@ -742,7 +738,9 @@ for stdout_tty, stderr_tty in [(False, False), (False, True),
         assert b'mock worker' in data and b'mock ' + name.encode() + b':' in data, data
         if terminal:
             assert all(line.startswith(color) and line.endswith(b'\x1b[0m\n')
-                       for line in data.splitlines(keepends=True)), (name, data)
+                       for line in data.splitlines(keepends=True)
+                       if b'mock worker' in line or b'mock ' + name.encode() + b':' in line), (name, data)
+            assert (b'mock carriage return:' if name == 'stdout' else b'mock footer:') in data
             assert b'\x1b[?2026h' not in data, data
         else:
             assert b'\x1b' not in data, (name, data)

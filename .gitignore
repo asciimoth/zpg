@@ -9,3 +9,5 @@ zig-pkg/
 
 /.envrc
 /local
+
+__pycache__/
