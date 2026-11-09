@@ -1,3 +1,5 @@
+set dotenv-load
+
 [positional-arguments]
 run *args:
     zig build
@@ -18,6 +20,12 @@ demo-test:
 demo-report:
     zig build
     PATH="./zig-out/bin:$PATH" zpg --name "shell demo" sh examples/report-demo.sh
+
+package:
+    @goreleaser --version | awk '$1 == "GitVersion:" { split($2, v, "."); ok = v[1] > 2 || (v[1] == 2 && v[2] >= 19) } END { if (!ok) { print "GoReleaser 2.19 or newer is required" > "/dev/stderr"; exit 1 } }'
+    goreleaser check
+    env -u GITHUB_TOKEN goreleaser release --snapshot --clean
+    python3 tools/package_artifacts.py
 
 check: typos
     zig fmt --check build.zig src test/fixtures

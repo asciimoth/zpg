@@ -1,0 +1,46 @@
+version: 2
+project_name: zpg
+
+builds:
+  - id: zpg
+    builder: zig
+    binary: zpg
+    targets:
+      - x86_64-linux
+      - x86-linux
+      - aarch64-linux
+    flags:
+      - -Doptimize=ReleaseSafe
+
+archives:
+  - ids:
+      - zpg
+    formats:
+      - binary
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Target }}"
+
+nfpms:
+  - id: zpg
+    ids:
+      - zpg
+    package_name: zpg
+    description: Run commands with a progress overlay
+    homepage: https://github.com/asciimoth/zpg
+    maintainer: AsciiMoth <ascii@moth.contact>
+    license: GPL-3.0-only
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+      - archlinux
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/zpg/LICENSE
+      - src: LICENSE-UNICODE
+        dst: /usr/share/licenses/zpg/LICENSE-UNICODE
+
+checksum:
+  name_template: checksums.txt
+
+signs:
+  - artifacts: all

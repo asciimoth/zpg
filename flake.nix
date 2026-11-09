@@ -3,6 +3,8 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # GoReleaser 2.19+ maps Zig x86 builds to the 386 package architecture.
+    nixpkgs-goreleaser.url = "github:NixOS/nixpkgs/f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
     git-hooks.url = "github:cachix/git-hooks.nix";
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -11,6 +13,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-goreleaser,
       git-hooks,
       ...
     }:
@@ -75,9 +78,12 @@
               with pkgs;
               [
                 zig_0_17
+                python3
                 just
                 nixfmt
 
+                gnupg
+                nixpkgs-goreleaser.legacyPackages.${system}.goreleaser
                 (vhs.override {
                   chromium = chromium.override {
                     commandLineArgs = "--password-store=basic";
