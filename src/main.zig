@@ -34,4 +34,8 @@ test {
     _ = output;
     _ = @import("progress.zig");
     _ = @import("supervisor.zig");
+    if (@import("builtin").os.tag == .linux) {
+        try std.testing.expect(!@import("builtin").link_libc);
+        _ = @import("spawn_linux.zig");
+    }
 }

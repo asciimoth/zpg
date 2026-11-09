@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-extern "c" fn zpg_spawn(pid: *std.posix.pid_t, argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, out: c_int, err: c_int, progress_fd: c_int, ignore_stdin: c_int) c_int;
 const capture = @import("output_capture.zig");
 
 pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8, node: std.Progress.Node) !std.process.Child {
@@ -40,9 +39,9 @@ pub fn spawnWithProgressFile(io: std.Io, environ: std.process.Environ, argv: []c
         return child;
     }
 
-    // Zig 0.17.0's processSpawnDarwin creates a progress pipe but builds the
-    // environment with zig_progress_fd = -1. Supply both through posix_spawnp
-    // until the standard library passes the pipe descriptor to the child.
+    // Build the pipe and environment together for raw progress capture.
+    // On macOS this also avoids Zig 0.17.0's processSpawnDarwin bug: it creates
+    // a progress pipe but builds the environment with zig_progress_fd = -1.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -54,8 +53,10 @@ pub fn spawnWithProgressFile(io: std.Io, environ: std.process.Environ, argv: []c
     const progress_write = progress_file orelse progress.?[1];
     const env = try environ.createPosixBlock(allocator, .{ .zig_progress_fd = progress_write.handle });
 
-    var pid: std.posix.pid_t = undefined;
-    try check(zpg_spawn(&pid, argv_z.ptr, env.slice.ptr, stdout[1].handle, stderr[1].handle, progress_write.handle, @intFromBool(terminal_stdin)));
+    const pid = if (builtin.os.tag == .linux)
+        try @import("spawn_linux.zig").spawn(allocator, argv_z.ptr, env.slice.ptr, environ.getPosix("PATH") orelse "/bin:/usr/bin", stdout[1].handle, stderr[1].handle, progress_write.handle, terminal_stdin)
+    else
+        try spawn_darwin(argv_z.ptr, env.slice.ptr, stdout[1].handle, stderr[1].handle, progress_write.handle, terminal_stdin);
     if (progress) |files| {
         files[1].close(io);
         node.setIpcFile(io.userdata, files[0]);
@@ -68,6 +69,26 @@ pub fn spawnWithProgressFile(io: std.Io, environ: std.process.Environ, argv: []c
         .stderr = stderr[0],
         .request_resource_usage_statistics = false,
     };
+}
+
+// macOS uses libSystem as its supported system call interface.
+fn spawn_darwin(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, out: c_int, err: c_int, progress_fd: c_int, ignore_stdin: bool) !std.posix.pid_t {
+    var actions: std.c.posix_spawn_file_actions_t = undefined;
+    try check(std.c.posix_spawn_file_actions_init(&actions));
+    defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
+    var attributes: std.c.posix_spawnattr_t = undefined;
+    try check(std.c.posix_spawnattr_init(&attributes));
+    defer _ = std.c.posix_spawnattr_destroy(&attributes);
+    if (ignore_stdin)
+        try check(std.c.posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", @bitCast(std.posix.O{ .ACCMODE = .RDONLY }), 0));
+    try check(std.c.posix_spawn_file_actions_adddup2(&actions, out, 1));
+    try check(std.c.posix_spawn_file_actions_adddup2(&actions, err, 2));
+    try check(std.c.posix_spawn_file_actions_addinherit_np(&actions, progress_fd));
+    try check(std.c.posix_spawnattr_setpgroup(&attributes, 0));
+    try check(std.c.posix_spawnattr_setflags(&attributes, .{ .SETPGROUP = true }));
+    var pid: std.posix.pid_t = undefined;
+    try check(std.c.posix_spawnp(&pid, argv[0].?, &actions, &attributes, argv, env));
+    return pid;
 }
 
 fn pipe(nonblocking: bool) ![2]std.Io.File {

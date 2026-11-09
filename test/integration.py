@@ -874,6 +874,51 @@ assert b'no progress received' in p.stderr, p.stderr
 assert b'process result=' in p.stderr, p.stderr
 p = capture_output('--test', 'sh', '-c', 'zpg --report 3 4 --name work')
 assert b'completed=3 total=4 name="work"' in p.stderr, p.stderr
+# Raw-pipe spawning must preserve PATH search, launch errors, and process groups.
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    denied, allowed = root / 'denied', root / 'allowed'
+    denied.mkdir()
+    allowed.mkdir()
+    (denied / 'lookup').write_text('not executable\n')
+    command = allowed / 'lookup'
+    command.write_text('#!/bin/sh\nprintf "%s\\n" "$1"\n')
+    command.chmod(0o755)
+    for search in [f'{denied}:{allowed}', f'{command}/not-a-directory:{allowed}', '']:
+        p = subprocess.run([exe, '--test', 'lookup', 'argument value'],
+                           cwd=allowed, env=dict(env, PATH=search),
+                           capture_output=True, timeout=5)
+        assert (p.returncode, p.stdout) == (0, b'argument value\n'), p
+    for search, error in [(str(denied), b'AccessDenied'),
+                          (str(root / 'missing'), b'FileNotFound')]:
+        p = subprocess.run([exe, '--test', 'lookup'], env=dict(env, PATH=search),
+                           capture_output=True, timeout=5)
+        assert p.returncode == 1 and error in p.stderr, p
+    command.write_text('executable without a valid image or interpreter\n')
+    p = capture_output('--test', str(command), code=1)
+    assert b'InvalidExe' in p.stderr, p.stderr
+    p = capture_output('--test', str(command / 'child'), code=1)
+    assert b'NotDir' in p.stderr, p.stderr
+p = capture_output('--test', 'zpg-command-that-does-not-exist', code=1)
+assert b'FileNotFound' in p.stderr, p.stderr
+state = ('import os, sys; '
+         'assert os.getpid() == os.getpgrp(); '
+         'assert os.get_inheritable(int(os.environ["ZIG_PROGRESS"])); '
+         'sys.stdout.buffer.write(sys.stdin.buffer.read())')
+p = subprocess.run([exe, '--test', sys.executable, '-c', state],
+                   input=b'input\x00bytes\n', capture_output=True, env=env, timeout=5)
+assert (p.returncode, p.stdout) == (0, b'input\x00bytes\n'), p
+p = subprocess.Popen([exe, '--test', sys.executable, fixture, 'stop'],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+try:
+    assert p.stdout.readline().strip().isdigit()
+    p.send_signal(signal.SIGTERM)
+    _, log = p.communicate(timeout=5)
+    assert p.returncode == 143, (p.returncode, log)
+finally:
+    if p.poll() is None:
+        p.kill()
+        p.wait()
 for args in [('--test-output', 'log', 'true'), ('--test', '--test-output'),
              ('--test', '--mock'), ('--test', '--no-progress', 'true'),
              ('--test', '--guess', 'true'), ('--test', '--report', '0', '1')]:

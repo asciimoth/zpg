@@ -1,5 +1,24 @@
 const std = @import("std");
-extern "c" fn zpg_terminal_width(codepoint: c_uint) c_int;
+const builtin = @import("builtin");
+const unicode_width = @import("unicode_width.zig");
+
+// Inode numbers alone can collide on separate device filesystems.
+pub fn same_terminal(first: std.posix.fd_t, second: std.posix.fd_t) bool {
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var a: linux.Statx = undefined;
+        var b: linux.Statx = undefined;
+        if (linux.errno(linux.statx(first, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &a)) != .SUCCESS or
+            linux.errno(linux.statx(second, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &b)) != .SUCCESS) return false;
+        return a.mask.TYPE and b.mask.TYPE and
+            linux.S.ISCHR(a.mode) and linux.S.ISCHR(b.mode) and
+            a.rdev_major == b.rdev_major and a.rdev_minor == b.rdev_minor;
+    }
+    var a: std.c.Stat = undefined;
+    var b: std.c.Stat = undefined;
+    return std.c.fstat(first, &a) == 0 and std.c.fstat(second, &b) == 0 and
+        std.c.S.ISCHR(a.mode) and std.c.S.ISCHR(b.mode) and a.rdev == b.rdev;
+}
 
 // Track only the cursor and the last occupied row. Output bytes are never
 // changed. This is not a screen buffer or a full terminal emulator.
@@ -155,7 +174,7 @@ pub const Cursor = struct {
                     self.utf8_len += 1;
                     if (self.utf8_len == self.utf8_needed) {
                         const cp = std.unicode.utf8Decode(self.utf8[0..self.utf8_len]) catch 0xfffd;
-                        self.cells(@intCast(zpg_terminal_width(cp)));
+                        self.cells(unicode_width.cell_width(cp));
                         self.utf8_len = 0;
                     }
                     continue;

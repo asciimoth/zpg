@@ -1,7 +1,6 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const terminal = @import("terminal.zig");
-extern "c" fn zpg_same_terminal(first: c_int, second: c_int) c_int;
 // Log writes clear the tree; the next progress snapshot restores it.
 // Keep that blank interval near one display frame instead of the default 80 ms.
 pub const progress_refresh_rate: std.Io.Duration = .fromMilliseconds(16);
@@ -35,7 +34,7 @@ pub fn configure(io: std.Io, choice: cli.ProgressStream) !?std.Io.File {
     progress_stream = stream;
     for ([_]Stream{ .stdout, .stderr }, 0..) |candidate, index| {
         tracked_streams[index] = try candidate.file().isTty(io) and
-            zpg_same_terminal(candidate.file().handle, stream.file().handle) != 0;
+            terminal.same_terminal(candidate.file().handle, stream.file().handle);
     }
     const attributes = try std.posix.tcgetattr(stream.file().handle);
     cursor = .{ .newline_resets_column = attributes.oflag.OPOST and attributes.oflag.ONLCR };

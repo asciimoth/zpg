@@ -12,9 +12,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe.root_module.link_libc = true;
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/spawn.c") });
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/terminal.c") });
+    // macOS requires libSystem. Linux uses Zig's direct system calls.
+    exe.root_module.link_libc = target.result.os.tag == .macos;
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
