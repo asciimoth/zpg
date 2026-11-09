@@ -27,6 +27,15 @@ zpg --guess cp large.iso /backup/
 zpg --mock
 ```
 
+`--mock` runs a fixed progress demo when stdin is empty. With piped or
+redirected input, it echoes each line with a short delay and shows input
+progress. It also prints a final line that has no newline:
+
+```sh
+printf 'one\ntwo\n' | zpg --mock
+zpg --mock < input.txt
+```
+
 Use `zpg [options] <command> [args...]`. Put `zpg` options before the command.
 Arguments after the command go to the command unchanged. `zpg` uses `PATH`
 to find commands. For shell syntax, use `zpg sh -c '...'`. If a command name
@@ -82,8 +91,16 @@ unknown progress.
 
 The command's stdout and stderr both go to `zpg`'s stderr, with their bytes
 unchanged. The streams can interleave. To save both, use `zpg command 2>log`.
-The command receives no stdin and does not see a terminal. `zpg` does not
-support interactive commands or full-screen applications.
+The command inherits stdin when it is a pipe or a file:
+
+```sh
+cat input.txt | zpg worker
+zpg worker < input.txt
+```
+
+When stdin is a terminal, the command receives an empty stdin instead.
+The command's stdout and stderr are pipes. `zpg` does not support interactive
+commands or full-screen applications.
 
 `zpg` returns the command's exit code. If a signal kills the command, `zpg`
 returns `128 + signal`. Invalid arguments return 2. Launch or I/O errors

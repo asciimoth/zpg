@@ -11,6 +11,10 @@ if mode == 'args':
     print('tty=' + repr((os.isatty(1), os.isatty(2))))
 elif mode == 'bytes':
     os.write(int(sys.argv[2]), b'first\n\nlast\r\x1b[31m\x00' + bytes(range(256)) + b'x' * 20000)
+elif mode == 'stdin':
+    while chunk := sys.stdin.buffer.read(4096):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
 elif mode == 'volume':
     for i in range(3000):
         token = bytes(97 + int(digit, 16) for digit in format(i, '08x'))

@@ -2,10 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8, node: std.Progress.Node) !std.process.Child {
+    // A child in a separate process group cannot read the foreground terminal.
+    // Files and pipes can be inherited directly, without an input copy task.
+    const terminal_stdin = try std.Io.File.stdin().isTty(io);
     if (builtin.os.tag != .macos or node.index == .none) {
         return std.process.spawn(io, .{
             .argv = argv,
-            .stdin = .ignore,
+            .stdin = if (terminal_stdin) .ignore else .inherit,
             .stdout = .pipe,
             .stderr = .pipe,
             .progress_node = node,
@@ -33,8 +36,10 @@ pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8,
     var actions: std.c.posix_spawn_file_actions_t = undefined;
     try check(std.c.posix_spawn_file_actions_init(&actions));
     defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
-    const read_only: std.posix.O = .{ .ACCMODE = .RDONLY };
-    try check(std.c.posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", @bitCast(read_only), 0));
+    if (terminal_stdin) {
+        const read_only: std.posix.O = .{ .ACCMODE = .RDONLY };
+        try check(std.c.posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", @bitCast(read_only), 0));
+    }
     try check(std.c.posix_spawn_file_actions_adddup2(&actions, stdout[1].handle, 1));
     try check(std.c.posix_spawn_file_actions_adddup2(&actions, stderr[1].handle, 2));
     try check(std.c.posix_spawn_file_actions_addinherit_np(&actions, progress[1].handle));

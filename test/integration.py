@@ -23,7 +23,7 @@ env.pop('UNICODE_PROGRESS_BAR', None)
 
 def run(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       env=env, timeout=15)
+                       stdin=subprocess.DEVNULL, env=env, timeout=15)
     assert p.returncode == code, (args, p.returncode, p.stderr)
     assert p.stdout == b'', p.stdout
     return p.stderr
@@ -86,6 +86,30 @@ assert run('--', sys.executable, fixture, 'args', '--help') == run(
     sys.executable, fixture, 'args', '--help')
 # Neither pipe may gain labels, newlines, or a final status message.
 payload = b'first\n\nlast\r\x1b[31m\x00' + bytes(range(256)) + b'x' * 20000
+# Input must survive pipes, file redirection, and nested supervisors unchanged.
+input_payload = payload * 16
+for prefix in ([], ['--no-progress'], [exe]):
+    command = [exe, *prefix, sys.executable, fixture, 'stdin']
+    p = subprocess.run(command, input=input_payload, capture_output=True, env=env, timeout=15)
+    assert (p.returncode, p.stdout, p.stderr) == (0, b'', input_payload)
+    with tempfile.TemporaryFile() as source:
+        source.write(input_payload)
+        source.seek(0)
+        p = subprocess.run(command, stdin=source, capture_output=True, env=env, timeout=15)
+    assert (p.returncode, p.stdout, p.stderr) == (0, b'', input_payload)
+# A worker that does not read stdin must exit even while the input pipe is open.
+with subprocess.Popen([exe, 'true'], stdin=subprocess.PIPE,
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
+    assert p.wait(timeout=5) == 0
+# Terminal stdin must still produce EOF instead of waiting for user input.
+input_master, input_slave = pty.openpty()
+try:
+    p = subprocess.run([exe, sys.executable, fixture, 'stdin'], stdin=input_slave,
+                       capture_output=True, env=env, timeout=5)
+    assert (p.returncode, p.stdout, p.stderr) == (0, b'', b'')
+finally:
+    os.close(input_master)
+    os.close(input_slave)
 for fd in ('1', '2'):
     assert worker('bytes', fd) == payload
     assert run('--guess', sys.executable, fixture, 'bytes', fd) == payload
@@ -172,6 +196,42 @@ assert b'[zpg:' not in log and b'exited with code' not in log
 assert b'mock stdout: complete' in log and b'mock stderr: complete' in log
 assert b'\x1b' not in log
 run('--no-progress', 'zpg', '--mock')
+# Input mode echoes complete lines and a final partial line, including lines
+# that cross the read buffer. It must leave the fixed demo for empty stdin.
+mock_input = b'first\n' + b'x' * 5000 + b'\nlast'
+for prefix in ([], ['--no-progress']):
+    start = time.monotonic()
+    p = subprocess.run([exe, *prefix, '--mock'], input=mock_input,
+                       capture_output=True, env=env, timeout=5)
+    assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
+    assert time.monotonic() - start >= .3
+with tempfile.TemporaryFile() as source:
+    source.write(mock_input)
+    source.seek(0)
+    p = subprocess.run([exe, '--mock'], stdin=source,
+                       capture_output=True, env=env, timeout=5)
+assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
+p = subprocess.run([exe, 'zpg', '--mock'], input=mock_input,
+                   capture_output=True, env=env, timeout=5)
+assert (p.returncode, p.stdout, p.stderr) == (0, b'', mock_input)
+# Ctrl-C must stop a mock even when its input pipe remains open and idle.
+for initial in (b'', b'first\n'):
+    p = subprocess.Popen([exe, '--mock'], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        if initial:
+            p.stdin.write(initial)
+            p.stdin.flush()
+        time.sleep(.2)
+        p.send_signal(signal.SIGINT)
+        assert p.wait(timeout=3) == 130
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        p.stdin.close()
+        p.stdout.close()
+        p.stderr.close()
 # An interrupt must stop and reap all three worker processes.
 p = subprocess.Popen([exe, '--mock'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                      bufsize=0)
@@ -258,12 +318,12 @@ print('integration checks passed (including terminal progress)')
 
 
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
-                     stop_after=None, code=0, stdout_pattern=b''):
+                     stop_after=None, code=0, stdout_pattern=b'', stdin=subprocess.DEVNULL):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
     child_env = dict(terminal_env, **(extra_env or {}))
     process = subprocess.Popen([exe, *args], stdout=subprocess.PIPE,
-                               stderr=slave, env=child_env)
+                               stdin=stdin, stderr=slave, env=child_env)
     os.close(slave)
     captured = bytearray()
     start = time.monotonic()
@@ -303,7 +363,41 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
             process.wait()
 
 
+# Exercise stdin with active progress, including the macOS spawn path.
+input_read, input_write = os.pipe()
+try:
+    os.write(input_write, b'pipe input marker\n')
+finally:
+    os.close(input_write)
+try:
+    capture = terminal_capture([sys.executable, fixture, 'stdin'], stdin=input_read)
+    assert b'pipe input marker' in capture, capture
+finally:
+    os.close(input_read)
+with tempfile.TemporaryFile() as source:
+    source.write(b'file input marker\n')
+    source.seek(0)
+    capture = terminal_capture([sys.executable, fixture, 'stdin'], stdin=source)
+    assert b'file input marker' in capture, capture
+input_master, input_slave = pty.openpty()
+try:
+    terminal_capture([sys.executable, fixture, 'stdin'], stdin=input_slave)
+finally:
+    os.close(input_master)
+    os.close(input_slave)
+
 expected_logs = b'log line\n' * 12 + b'partial continued\n'
+input_read, input_write = os.pipe()
+try:
+    os.write(input_write, b'alpha\nbeta\ngamma\n')
+finally:
+    os.close(input_write)
+try:
+    capture = terminal_capture(['--mock'], stdin=input_read,
+                               stdout_pattern=b'alpha\nbeta\ngamma\n')
+    assert b'input lines' in capture, capture
+finally:
+    os.close(input_read)
 if sys.platform.startswith('linux'):
     with tempfile.TemporaryDirectory() as directory:
         source = pathlib.Path(directory) / 'input.bin'

@@ -126,6 +126,82 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
     }
 }
 
+fn emitInputLine(io: std.Io, line: []const u8, node: std.Progress.Node) !void {
+    if (signals.get() != 0) return error.Interrupted;
+    try output.writeStdout(io, line);
+    node.completeOne();
+    try io.sleep(.fromMilliseconds(120), .awake);
+    if (signals.get() != 0) return error.Interrupted;
+}
+
+fn processInputChunk(io: std.Io, allocator: std.mem.Allocator, pending: *std.ArrayList(u8), bytes: []const u8, node: std.Progress.Node) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = if (std.mem.indexOfScalarPos(u8, bytes, offset, '\n')) |index| index + 1 else bytes.len;
+        try pending.appendSlice(allocator, bytes[offset..end]);
+        if (bytes[end - 1] == '\n') {
+            try emitInputLine(io, pending.items, node);
+            pending.clearRetainingCapacity();
+        }
+        offset = end;
+    }
+}
+
+fn readInputTask(io: std.Io, buffer: *[4096]u8, done: *std.atomic.Value(bool)) !usize {
+    defer done.store(true, .release);
+    return std.Io.File.stdin().readStreaming(io, &.{buffer});
+}
+
+fn readInput(io: std.Io, buffer: *[4096]u8) !usize {
+    var done = std.atomic.Value(bool).init(false);
+    var task = try io.concurrent(readInputTask, .{ io, buffer, &done });
+    defer _ = task.cancel(io) catch {};
+    while (!done.load(.acquire)) {
+        if (signals.get() != 0) return error.Interrupted;
+        try io.sleep(.fromMilliseconds(20), .awake);
+    }
+    return task.await(io);
+}
+
+fn runInput(io: std.Io, allocator: std.mem.Allocator, o: cli.Options, first: []const u8) !u8 {
+    var display: progress_display.Progress = .{};
+    const root = try display.start(io, o.progress, o.renderer, o.style, .{
+        .root_name = o.name,
+        .refresh_rate_ns = output.progress_refresh_rate,
+    });
+    defer display.end(io);
+    const lines = root.start("input lines", 0);
+    defer lines.end();
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(allocator);
+
+    processInputChunk(io, allocator, &pending, first, lines) catch |err| switch (err) {
+        error.Interrupted => return @intCast(128 + signals.get()),
+        else => return err,
+    };
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        if (signals.get() != 0) return @intCast(128 + signals.get());
+        const count = readInput(io, &buffer) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.Interrupted => return @intCast(128 + signals.get()),
+            else => return err,
+        };
+        if (count == 0) continue;
+        processInputChunk(io, allocator, &pending, buffer[0..count], lines) catch |err| switch (err) {
+            error.Interrupted => return @intCast(128 + signals.get()),
+            else => return err,
+        };
+    }
+    if (pending.items.len != 0) {
+        emitInputLine(io, pending.items, lines) catch |err| switch (err) {
+            error.Interrupted => return @intCast(128 + signals.get()),
+            else => return err,
+        };
+    }
+    return if (signals.get() != 0) @intCast(128 + signals.get()) else 0;
+}
+
 fn statusCode(term: std.process.Child.Term) u8 {
     return switch (term) {
         .exited => |code| code,
@@ -237,6 +313,17 @@ pub fn runWorker(io: std.Io, kind: []const u8) !u8 {
 pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Environ, o: cli.Options) !u8 {
     const guard = signals.Guard.install();
     defer guard.restore();
+    if (!try std.Io.File.stdin().isTty(io)) {
+        var first: [4096]u8 = undefined;
+        while (true) {
+            const count = readInput(io, &first) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.Interrupted => return @intCast(128 + signals.get()),
+                else => return err,
+            };
+            if (count != 0) return runInput(io, allocator, o, first[0..count]);
+        }
+    }
     const exe = try std.process.executablePathAlloc(io, allocator);
     var display: progress_display.Progress = .{};
     const root = try display.start(io, o.progress, o.renderer, o.style, .{
