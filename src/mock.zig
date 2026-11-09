@@ -165,7 +165,7 @@ fn readInput(io: std.Io, buffer: *[4096]u8) !usize {
 
 fn runInput(io: std.Io, allocator: std.mem.Allocator, o: cli.Options, first: []const u8) !u8 {
     var display: progress_display.Progress = .{};
-    const root = try display.start(io, o.progress, o.renderer, o.style, .{
+    const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
         .root_name = o.name,
         .refresh_rate_ns = output.progress_refresh_rate,
     });
@@ -236,9 +236,9 @@ fn runWorkerProcess(
 
     var done = std.atomic.Value(u32).init(0);
     var exited = std.atomic.Value(bool).init(false);
-    var out = try io.concurrent(reader.run, .{ io, stdout, queue, &done, failed });
+    var out = try io.concurrent(reader.run, .{ io, stdout, .stdout, queue, &done, failed });
     defer out.cancel(io);
-    var err = try io.concurrent(reader.run, .{ io, stderr, queue, &done, failed });
+    var err = try io.concurrent(reader.run, .{ io, stderr, .stderr, queue, &done, failed });
     defer err.cancel(io);
     var waiter = try io.concurrent(waitChild, .{ io, &child, &exited });
     defer _ = waiter.cancel(io) catch {};
@@ -326,7 +326,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     }
     const exe = try std.process.executablePathAlloc(io, allocator);
     var display: progress_display.Progress = .{};
-    const root = try display.start(io, o.progress, o.renderer, o.style, .{
+    const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
         .root_name = "mock",
         .estimated_total_items = 6,
         .refresh_rate_ns = output.progress_refresh_rate,

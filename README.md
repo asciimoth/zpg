@@ -55,8 +55,11 @@ build [#########---] 75% 3/4
 
 Use `--name TEXT` to set the task label. The default is the command's basename.
 Use `--renderer tree` for the standard Zig tree display. Use `--no-progress`
-to hide progress. If stderr is redirected or the terminal does not support
-ANSI escapes, `zpg` hides progress.
+to hide progress. By default, progress uses stderr if it is a terminal, or
+stdout if only stdout is a terminal. If neither is a terminal, progress is hidden.
+Use `--progress-stream stdout` or `--progress-stream stderr` to select one
+explicitly. The selected stream must be a terminal that supports ANSI escapes.
+Use `--progress-stream auto` to select the default behavior.
 
 Set bar and spinner styles:
 
@@ -89,14 +92,23 @@ unknown progress.
 
 ### Command output and exit status
 
-The command's stdout and stderr both go to `zpg`'s stderr, with their bytes
-unchanged. The streams can interleave. To save both, use `zpg command 2>log`.
+The command's stdout goes to `zpg`'s stdout. Its stderr goes to `zpg`'s stderr.
+The command's bytes and their order within each stream stay unchanged.
+Progress controls are added only to the selected terminal stream.
 The command inherits stdin when it is a pipe or a file:
 
 ```sh
-cat input.txt | zpg worker
-zpg worker < input.txt
+zpg worker > output.txt
+cat input.txt | zpg worker > output.txt
+zpg worker < input.txt > output.txt
+zpg worker 2> errors.log
+zpg --progress-stream stderr worker > output.txt
 ```
+
+When stdout goes to a file or a pipe, progress remains visible on terminal
+stderr. When only stdout is a terminal, progress appears there instead.
+To save both streams without progress, use `zpg worker > combined.log 2>&1`.
+To combine them in a pipeline, use `zpg worker 2>&1 | consumer`.
 
 When stdin is a terminal, the command receives an empty stdin instead.
 The command's stdout and stderr are pipes. `zpg` does not support interactive

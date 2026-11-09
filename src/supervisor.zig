@@ -23,7 +23,7 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
     defer guard.restore();
     const term = blk: {
         var display: progress.Progress = .{};
-        const root = try display.start(io, o.progress, o.renderer, o.style, .{
+        const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
             .root_name = "zpg",
             .refresh_rate_ns = output.progress_refresh_rate,
         });
@@ -47,9 +47,9 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         var exited = std.atomic.Value(bool).init(false);
         var writer = try io.concurrent(output.run, .{ io, &queue, &failed });
         defer writer.cancel(io);
-        var out = try io.concurrent(reader.run, .{ io, stdout, &queue, &done, &failed });
+        var out = try io.concurrent(reader.run, .{ io, stdout, .stdout, &queue, &done, &failed });
         defer out.cancel(io);
-        var err = try io.concurrent(reader.run, .{ io, stderr, &queue, &done, &failed });
+        var err = try io.concurrent(reader.run, .{ io, stderr, .stderr, &queue, &done, &failed });
         defer err.cancel(io);
         var waiter = try io.concurrent(wait, .{ io, &child, &exited });
         defer _ = waiter.cancel(io) catch {};

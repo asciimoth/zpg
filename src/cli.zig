@@ -1,6 +1,7 @@
 const std = @import("std");
 const style = @import("style.zig");
 pub const Renderer = enum { bars, tree };
+pub const ProgressStream = enum { auto, stdout, stderr };
 pub const Report = struct {
     completed: u32,
     total: u32,
@@ -13,6 +14,7 @@ pub const Options = struct {
     help: bool = false,
     report: ?Report = null,
     renderer: Renderer = .bars,
+    progress_stream: ProgressStream = .auto,
     style: style.Style = .{},
     argv: []const []const u8 = &.{},
 };
@@ -31,6 +33,8 @@ pub const usage =
     \\  --spinner-style ascii|dots|fira|FRAMES
     \\                              One to 64 characters, one per frame
     \\  --no-progress               Disable progress display
+    \\  --progress-stream auto|stdout|stderr
+    \\                              Progress terminal (default: auto, prefer stderr)
     \\  --guess                     Estimate file I/O progress (Linux)
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\  --                        End options before a command starting with '-'
@@ -62,6 +66,10 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             name = args[i];
         } else if (std.mem.eql(u8, a, "--no-progress")) {
             o.progress = false;
+        } else if (std.mem.eql(u8, a, "--progress-stream")) {
+            i += 1;
+            if (i == args.len) return error.MissingProgressStream;
+            o.progress_stream = std.meta.stringToEnum(ProgressStream, args[i]) orelse return error.InvalidProgressStream;
         } else if (std.mem.eql(u8, a, "--guess")) {
             o.guess = true;
         } else if (std.mem.eql(u8, a, "--report")) {
@@ -101,6 +109,20 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
     if (!o.mock and !o.help and o.report == null and o.argv.len == 0) return error.MissingCommand;
     o.name = name orelse if (o.report != null) "" else if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
+}
+
+test "progress stream selection preserves child flags and no-progress" {
+    try std.testing.expectEqual(ProgressStream.auto, (try parse(&.{"true"}, null)).progress_stream);
+    for ([_]ProgressStream{ .auto, .stdout, .stderr }) |stream| {
+        const o = try parse(&.{ "--progress-stream", @tagName(stream), "tool", "--progress-stream", "child-value" }, null);
+        try std.testing.expectEqual(stream, o.progress_stream);
+        try std.testing.expectEqualSlices([]const u8, &.{ "tool", "--progress-stream", "child-value" }, o.argv);
+    }
+    const disabled = try parse(&.{ "--no-progress", "--progress-stream", "stdout", "--mock" }, null);
+    try std.testing.expect(!disabled.progress);
+    try std.testing.expectEqual(ProgressStream.stdout, disabled.progress_stream);
+    try std.testing.expectError(error.MissingProgressStream, parse(&.{"--progress-stream"}, null));
+    try std.testing.expectError(error.InvalidProgressStream, parse(&.{ "--progress-stream", "bad", "true" }, null));
 }
 
 test "guess requires a command and preserves child options" {

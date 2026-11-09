@@ -21,20 +21,27 @@ report_demo = str(pathlib.Path(__file__).parent.parent / 'examples' / 'report-de
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 env.pop('UNICODE_PROGRESS_BAR', None)
 
-def run(*args, code=0):
+def capture_output(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        stdin=subprocess.DEVNULL, env=env, timeout=15)
     assert p.returncode == code, (args, p.returncode, p.stderr)
-    assert p.stdout == b'', p.stdout
-    return p.stderr
+    return p
 
-def worker(mode, *args, code=0):
-    return run('--name', 'worker', sys.executable, fixture, mode, *args, code=code)
+def run(*args, code=0, stream=None):
+    p = capture_output(*args, code=code)
+    stream = stream or ('stderr' if code in (1, 2) else 'stdout')
+    other = p.stderr if stream == 'stdout' else p.stdout
+    assert other == b'', other
+    return getattr(p, stream)
+
+def worker(mode, *args, code=0, stream=None):
+    return run('--name', 'worker', sys.executable, fixture, mode, *args, code=code, stream=stream)
 
 for args in [(), ('--bad',), ('--guessa', 'true'), ('--name',), ('--mock', 'true'),
              ('--guess',), ('--guess', '--mock'),
              ('--guess', '--report', '1', '2'),
              ('--renderer',), ('--renderer', 'bad', 'true'),
+             ('--progress-stream',), ('--progress-stream', 'bad', 'true'),
              ('--bar-style',), ('--spinner-style',),
              ('--bar-style', 'bad', 'true'),
              ('--bar-style', '#\n', 'true'),
@@ -43,7 +50,7 @@ for args in [(), ('--bad',), ('--guessa', 'true'), ('--name',), ('--mock', 'true
              ('--spinner-style', '\x1b[2J', 'true'),
              ('--spinner-style', '\u2066', 'true')]:
     run(*args, code=2)
-assert b'Usage:' in run('--help')
+assert b'Usage:' in run('--help', stream='stderr')
 # A report is silent without a supervisor, including redirected scripts.
 report_env = dict(env)
 report_env.pop('ZIG_PROGRESS', None)
@@ -74,7 +81,11 @@ finally:
 script = 'set -e; zpg --report 1 4; printf "script log\\n"; zpg --report 4 4'
 assert run('sh', '-c', script) == b'script log\n'
 assert run('--no-progress', 'sh', '-c', script) == b'script log\n'
-demo_log = run('--name', 'shell demo', 'sh', report_demo)
+demo_result = capture_output('--name', 'shell demo', 'sh', report_demo)
+demo_log = demo_result.stdout
+assert demo_result.stderr == (b'shell demo: discover complete\n'
+                              b'shell demo: build complete\n'
+                              b'shell demo: publish complete\n')
 for worker_name in (b'indexer', b'compiler', b'uploader'):
     assert worker_name + b': finish complete' in demo_log
 assert b'shell demo: complete' in demo_log
@@ -91,12 +102,12 @@ input_payload = payload * 16
 for prefix in ([], ['--no-progress'], [exe]):
     command = [exe, *prefix, sys.executable, fixture, 'stdin']
     p = subprocess.run(command, input=input_payload, capture_output=True, env=env, timeout=15)
-    assert (p.returncode, p.stdout, p.stderr) == (0, b'', input_payload)
+    assert (p.returncode, p.stdout, p.stderr) == (0, input_payload, b'')
     with tempfile.TemporaryFile() as source:
         source.write(input_payload)
         source.seek(0)
         p = subprocess.run(command, stdin=source, capture_output=True, env=env, timeout=15)
-    assert (p.returncode, p.stdout, p.stderr) == (0, b'', input_payload)
+    assert (p.returncode, p.stdout, p.stderr) == (0, input_payload, b'')
 # A worker that does not read stdin must exit even while the input pipe is open.
 with subprocess.Popen([exe, 'true'], stdin=subprocess.PIPE,
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
@@ -111,26 +122,25 @@ finally:
     os.close(input_master)
     os.close(input_slave)
 for fd in ('1', '2'):
-    assert worker('bytes', fd) == payload
-    assert run('--guess', sys.executable, fixture, 'bytes', fd) == payload
+    assert worker('bytes', fd, stream='stdout' if fd == '1' else 'stderr') == payload
+    assert run('--guess', sys.executable, fixture, 'bytes', fd, stream='stdout' if fd == '1' else 'stderr') == payload
 assert run('--guess', sys.executable, fixture, 'exit', code=37) == b''
 assert run('--guess', sys.executable, fixture, 'signal', code=143) == b''
 assert run('true') == b''
-log = worker('volume')
-# Distinct alphabets let us check per-pipe order even if chunks interleave
-# in the middle of a write. The child fills both pipes without any LF bytes.
+volume = capture_output(sys.executable, fixture, 'volume')
+# The child fills both pipes without any LF bytes. Check each destination
+# independently, including byte order and output larger than the read buffer.
 expected = b''.join(bytes(97 + int(digit, 16) for digit in format(i, '08x')) + b'q'
                     for i in range(3000))
-assert bytes(c for c in log if 97 <= c <= 122) == expected + b'x' * 20000
-assert bytes(c for c in log if 65 <= c <= 90) == expected.upper()
-assert len(log) == 2 * len(expected) + 20000
+assert volume.stdout == expected + b'x' * 20000
+assert volume.stderr == expected.upper()
 # A partial line must reach the output while the child is still running.
 p = subprocess.Popen([exe, '--no-progress', sys.executable, fixture, 'partial'],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 try:
-    ready, _, _ = select.select([p.stderr], [], [], 5)
+    ready, _, _ = select.select([p.stdout], [], [], 5)
     assert ready, 'partial output was buffered until EOF'
-    partial = os.read(p.stderr.fileno(), 4096)
+    partial = os.read(p.stdout.fileno(), 4096)
     assert partial == b'working\r' and p.poll() is None
     p.terminate()
     stdout, tail = p.communicate(timeout=5)
@@ -141,10 +151,13 @@ finally:
         p.wait()
 # A failed output device must not leave the child blocked on full pipes.
 if sys.platform.startswith('linux'):
-    with open('/dev/full', 'wb') as sink:
-        p = subprocess.run([exe, sys.executable, fixture, 'volume'], stderr=sink,
-                           stdout=subprocess.PIPE, timeout=8)
-    assert p.returncode == 1
+    for stream in ('stdout', 'stderr'):
+        with open('/dev/full', 'wb') as sink:
+            destinations = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            destinations[stream] = sink
+            p = subprocess.run([exe, sys.executable, fixture, 'volume'],
+                               **destinations, timeout=8)
+        assert p.returncode == 1
     with open('/dev/full', 'wb') as sink:
         p = subprocess.run([exe, '--mock'], stderr=sink,
                            stdout=subprocess.PIPE, timeout=8)
@@ -153,9 +166,9 @@ assert worker('exit', code=37) == b''
 assert worker('signal', code=143) == b''
 for sig, mode in [(signal.SIGINT, 'stop'), (signal.SIGTERM, 'stop'), (signal.SIGINT, 'stubborn')]:
     p = subprocess.Popen([exe, sys.executable, fixture, mode], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-    ready, _, _ = select.select([p.stderr], [], [], 5)
+    ready, _, _ = select.select([p.stdout], [], [], 5)
     assert ready
-    pid = int(p.stderr.readline())
+    pid = int(p.stdout.readline())
     start = time.monotonic()
     p.send_signal(sig)
     _, log = p.communicate(timeout=8)
@@ -179,9 +192,12 @@ with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
     stdout.seek(0)
     stderr.seek(0)
     log = stderr.read()
-    assert p.returncode == 0 and stdout.read() == b'', (p.returncode, log)
+    assert p.returncode == 0 and stdout.read() == b'parent done\n', (p.returncode, log)
     assert b'pipe drain timeout' in log and elapsed < 3.5, (elapsed, log)
-log = run('zpg', '--mock')
+mock_result = capture_output('zpg', '--mock')
+assert b'mock stderr:' not in mock_result.stdout
+assert b'mock stdout:' not in mock_result.stderr
+log = mock_result.stdout + mock_result.stderr
 assert log.count(b'mock stdout:') >= 20 and log.count(b'mock stderr:') >= 10
 workers = re.findall(rb'mock worker (indexer|compiler|uploader) \(pid (\d+)\): started', log)
 assert {name for name, _ in workers} == {b'indexer', b'compiler', b'uploader'}
@@ -195,7 +211,7 @@ assert max(log.index(b'mock worker ' + name + b' (pid') for name in
 assert b'[zpg:' not in log and b'exited with code' not in log
 assert b'mock stdout: complete' in log and b'mock stderr: complete' in log
 assert b'\x1b' not in log
-run('--no-progress', 'zpg', '--mock')
+capture_output('--no-progress', 'zpg', '--mock')
 # Input mode echoes complete lines and a final partial line, including lines
 # that cross the read buffer. It must leave the fixed demo for empty stdin.
 mock_input = b'first\n' + b'x' * 5000 + b'\nlast'
@@ -213,7 +229,7 @@ with tempfile.TemporaryFile() as source:
 assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
 p = subprocess.run([exe, 'zpg', '--mock'], input=mock_input,
                    capture_output=True, env=env, timeout=5)
-assert (p.returncode, p.stdout, p.stderr) == (0, b'', mock_input)
+assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
 # Ctrl-C must stop a mock even when its input pipe remains open and idle.
 for initial in (b'', b'first\n'):
     p = subprocess.Popen([exe, '--mock'], stdin=subprocess.PIPE,
@@ -293,11 +309,11 @@ for node in (b'discover', b'scan inputs', b'inspect metadata', b'build',
     assert node in log, node
 for node in (b'indexer batch', b'compiler batch', b'uploader batch'):
     assert node in log, node
-assert b'mock stdout:' in log and b'mock stderr:' in log
+assert b'mock stdout:' in p.communicate(timeout=2)[0] and b'mock stderr:' in log
 assert b'[zpg:' not in log and b'exited with code' not in log
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
-p = subprocess.Popen([exe, '--no-progress', 'zpg', '--mock'], stderr=slave, env=terminal_env)
+p = subprocess.Popen([exe, '--no-progress', 'zpg', '--mock'], stdout=slave, stderr=slave, env=terminal_env)
 os.close(slave)
 log = bytearray()
 while True:
@@ -318,11 +334,12 @@ print('integration checks passed (including terminal progress)')
 
 
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
-                     stop_after=None, code=0, stdout_pattern=b'', stdin=subprocess.DEVNULL):
+                     stop_after=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
     child_env = dict(terminal_env, **(extra_env or {}))
-    process = subprocess.Popen([exe, *args], stdout=subprocess.PIPE,
+    process = subprocess.Popen([exe, *args],
+                               stdout=slave if stdout_pattern is None else subprocess.PIPE,
                                stdin=stdin, stderr=slave, env=child_env)
     os.close(slave)
     captured = bytearray()
@@ -354,7 +371,8 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
             raise AssertionError('renderer terminal test timed out')
         stdout, _ = process.communicate(timeout=2)
         assert process.returncode == code, (process.returncode, captured)
-        assert re.fullmatch(stdout_pattern, stdout, re.S), stdout
+        if stdout_pattern is not None:
+            assert re.fullmatch(stdout_pattern, stdout, re.S), stdout
         return bytes(captured)
     finally:
         os.close(master)
@@ -625,7 +643,7 @@ capture = terminal_capture([*custom_args, exe, '--bar-style', 'ascii', render_pr
 assert ('█' * 9 + '    75% 3/4').encode() in capture
 assert b'[#########---]' not in capture
 capture = terminal_capture([*custom_args, '--mock'], stop_after=.8, code=130,
-                           stdout_pattern=rb'(mock stdout: work in progress\n)+')
+                           stdout_pattern=rb'(mock stdout: work in progress\n|mock worker: processing item\n)+')
 assert '█'.encode() in capture
 capture = terminal_capture(['--renderer', 'tree', render_probe])
 assert b'\x1b' in capture and b'render probe' in capture
@@ -638,3 +656,121 @@ for args, overrides in [(['--no-progress', render_probe], {}),
     capture = terminal_capture(args, extra_env=overrides)
     assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), (args, overrides, capture)
 print('custom renderer checks passed (including resize and partial log lines)')
+
+
+# Give stdout and stderr different terminals so the tests can identify exactly
+# which descriptor receives progress. Non-terminal streams go to real files.
+def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
+                         extra_env=None):
+    terminals = {}
+    files = {}
+    destinations = {}
+    captured = {name: bytearray() for name in ('stdout', 'stderr')}
+    process = None
+    try:
+        for name, is_tty in [('stdout', stdout_tty), ('stderr', stderr_tty)]:
+            if is_tty:
+                master, slave = pty.openpty()
+                terminals[name] = (master, slave)
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 80, 0, 0))
+                attributes = termios.tcgetattr(slave)
+                attributes[1] &= ~termios.OPOST
+                termios.tcsetattr(slave, termios.TCSANOW, attributes)
+                destinations[name] = slave
+            else:
+                files[name] = tempfile.TemporaryFile()
+                destinations[name] = files[name]
+        process = subprocess.Popen([exe, *args], stdin=stdin, **destinations,
+                                   env=dict(terminal_env, **(extra_env or {})))
+        for _, slave in terminals.values():
+            os.close(slave)
+        active = {master: name for name, (master, _) in terminals.items()}
+        deadline = time.monotonic() + 5
+        while active:
+            assert time.monotonic() < deadline, 'stream selection test timed out'
+            ready, _, _ = select.select(list(active), [], [], .1)
+            for master in ready:
+                try:
+                    data = os.read(master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    data = b''
+                if data:
+                    captured[active[master]].extend(data)
+                else:
+                    del active[master]
+        assert process.wait(timeout=5) == 0
+        for name, file in files.items():
+            file.seek(0)
+            captured[name].extend(file.read())
+        return {name: bytes(data) for name, data in captured.items()}
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        for master, slave in terminals.values():
+            os.close(master)
+            if process is None:
+                os.close(slave)
+        for file in files.values():
+            file.close()
+
+
+stream_script = ('printf "stdout marker\\n"; printf "stderr marker\\n" >&2; '
+                 'zpg --report 1 2 --name stream-progress; sleep .3; '
+                 'printf "stdout tail\\n"; printf "stderr tail\\n" >&2; sleep .15')
+for renderer in ('bars', 'tree'):
+    for stdout_tty, stderr_tty, choice, selected in [
+            (False, False, 'auto', None),
+            (False, True, 'auto', 'stderr'),
+            (True, False, 'auto', 'stdout'),
+            (True, True, 'auto', 'stderr'),
+            (True, True, 'stdout', 'stdout'),
+            (True, True, 'stderr', 'stderr'),
+            (False, True, 'stdout', None),
+            (True, False, 'stderr', None)]:
+        args = ['--renderer', renderer, '--progress-stream', choice, 'sh', '-c', stream_script]
+        captures = capture_destinations(args, stdout_tty, stderr_tty)
+        for name, data in captures.items():
+            marker = (name + ' marker\n').encode()
+            if name == selected:
+                assert b'\x1b' in data and b'stream-progress' in data, (args, name, data)
+                assert marker in data and (name + ' tail\n').encode() in data, (args, name, data)
+                assert (('stderr' if name == 'stdout' else 'stdout') + ' marker').encode() not in data
+            else:
+                assert data == marker + (name + ' tail\n').encode(), (args, name, data)
+    for options, overrides in [(['--no-progress'], {}), ([], {'TERM': 'dumb'})]:
+        captures = capture_destinations(['--renderer', renderer, *options, 'sh', '-c', stream_script],
+                                        True, True, extra_env=overrides)
+        assert captures == dict(stdout=b'stdout marker\nstdout tail\n', stderr=b'stderr marker\nstderr tail\n'), captures
+    # The outer process selects the terminal, even with conflicting inner flags.
+    captures = capture_destinations(['--renderer', renderer, '--progress-stream', 'stdout',
+                                     exe, '--progress-stream', 'stderr', 'sh', '-c', stream_script],
+                                    True, True)
+    assert b'stream-progress' in captures['stdout']
+    assert captures['stderr'] == b'stderr marker\nstderr tail\n'
+    # A pipe on stdin and a file on stdout must preserve all bytes while stderr
+    # continues to display progress, including with nested supervisors.
+    for prefix in ([], [exe]):
+        read_fd, write_fd = os.pipe()
+        input_bytes = bytes(range(256)) * 4
+        try:
+            os.write(write_fd, input_bytes)
+        finally:
+            os.close(write_fd)
+        try:
+            captures = capture_destinations(['--renderer', renderer, *prefix, 'sh', '-c',
+                                             'cat; zpg --report 1 2 --name input-progress; sleep .4'],
+                                            False, True, stdin=read_fd)
+        finally:
+            os.close(read_fd)
+        assert captures['stdout'] == input_bytes
+        assert b'input-progress' in captures['stderr'] and b'\x1b' in captures['stderr']
+print('separate streams and progress terminal selection checks passed')
+
+# The same terminal can be reached by both descriptors. Verify that stdout
+# progress also preserves partial log lines when the overlay causes scrolling.
+capture = terminal_capture(['--progress-stream', 'stdout', render_probe], rows=8)
+visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
+assert visible_logs == expected_logs.decode().splitlines(), visible_logs
