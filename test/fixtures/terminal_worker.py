@@ -17,8 +17,8 @@ with socket.socket(socket.AF_UNIX) as control:
     assert control.recv(1) == b'!'
     for chunk in chunks:
         if isinstance(chunk, dict):
-            count = chunk['nodes']
-            if progress is not None:
+            if progress is not None and 'nodes' in chunk:
+                count = chunk['nodes']
                 packet = (bytes([count]) + struct.pack('<II120s', 1, 2, b'__overlay__') * count
                           + bytes([255]) + bytes(count - 1))
                 os.write(int(progress), packet)

@@ -69,7 +69,7 @@ def cases(cols):
 class TerminalOutput(unittest.TestCase):
     def run_case(self, chunks, *, renderer='bars', nested=False, destination=1,
                  progress_stream='stderr', shared=True, rows=8, cols=40,
-                 convert=False, progress=True, interrupt=False):
+                 convert=False, progress=True, interrupt=False, expected_lines=None):
         env = dict(os.environ, TERM='xterm-256color')
         for key in ('ZIG_PROGRESS', 'ZPG_NO_PROGRESS', 'UNICODE_PROGRESS_BAR', 'NO_COLOR'):
             env.pop(key, None)
@@ -86,7 +86,7 @@ class TerminalOutput(unittest.TestCase):
             path = str(Path(directory) / 'control.sock')
             plan = str(Path(directory) / 'chunks.json')
             Path(plan).write_text(json.dumps([
-                dict(data=chunk['data'].hex(), nodes=chunk['nodes']) if isinstance(chunk, dict)
+                dict(chunk, data=chunk['data'].hex()) if isinstance(chunk, dict)
                 else chunk.hex() for chunk in chunks
             ]))
             with socket.socket(socket.AF_UNIX) as listener:
@@ -184,10 +184,25 @@ class TerminalOutput(unittest.TestCase):
                         data = chunk.replace(b'\n', b'\r\n') if convert else chunk
                         expected[target].extend(data)
                         baseline[target].feed(data)
+                        frame_start = len(models[target].snapshots)
                         deadline = time.monotonic() + 3
                         while output_without_overlay(bytes(captured[target])) != bytes(expected[target]):
                             self.assertLess(time.monotonic(), deadline, ('missing child bytes', index))
                             drain(.01)
+                        if 'frame_lines' in settings:
+                            # Keep the worker at this stage until a complete
+                            # redraw contains both its output and progress.
+                            # A fixed sleep can miss this frame on a busy host.
+                            deadline = time.monotonic() + 3
+                            while not any(
+                                all(line in frame for line in settings['frame_lines'])
+                                and any('__overlay__' in line and '1/2' in line for line in frame)
+                                for frame in models[target].snapshots[frame_start:]
+                            ):
+                                self.assertLess(time.monotonic(), deadline,
+                                                ('missing progress frame', index, renderer, nested,
+                                                 destination, models[target].snapshots[frame_start:]))
+                                drain(.01)
                         drain(.15 if settings else (.045 if progress else .001))
                         compare(index)
                         if 'hidden' in settings:
@@ -203,6 +218,8 @@ class TerminalOutput(unittest.TestCase):
                         drain(.02)
                     self.assertEqual(process.wait(timeout=3), 130 if interrupt else 0)
                     compare('exit', final=True)
+                    if expected_lines is not None:
+                        self.assertEqual([line for line in models[target].lines() if line], expected_lines)
                     if progress and rows > 2 and cols > 1:
                         self.assertTrue(any(model.frames for model in models.values()))
                     messages.close()
@@ -228,6 +245,26 @@ class TerminalOutput(unittest.TestCase):
                         self.run_case(cases(40), renderer=renderer, nested=nested,
                                       destination=destination,
                                       progress_stream='stdout' if destination == 1 else 'stderr')
+
+    def test_control_frames(self):
+        chunks = [
+            b'log\n' * 10,
+            dict(data=b'abcdefghij\rXY', frame_lines=['XYcdefghij']),
+            b'\r\x1b[2Kbar 100%\n',
+            dict(data=b'footer old\nitems 0/2\r\x1b[A',
+                 frame_lines=['footer old', 'items 0/2']),
+            b'\x1b[',
+            b'2Kfooter done\x1b[B\r\x1b[2Kitems 2/2\x1b[A\r',
+            b'\x1b[B\r\n',
+        ]
+        expected = ['log'] * 10 + ['bar 100%', 'footer done', 'items 2/2']
+        for renderer in ('bars', 'tree'):
+            for nested in (False, True):
+                for destination in (1, 2):
+                    with self.subTest(renderer=renderer, nested=nested, destination=destination):
+                        self.run_case(chunks, renderer=renderer, nested=nested,
+                                      destination=destination, cols=80, convert=True,
+                                      expected_lines=expected)
 
     def test_separate_terminals(self):
         chunks = [b'first\r\n', b'long value\rOK', b'\x1b[2Kdone\r\n',
