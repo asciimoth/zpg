@@ -23,6 +23,7 @@ import time
 import unittest
 
 from terminal_model import Terminal, check_model
+from fixture_sync import FixtureSync
 
 EXE = str(Path(sys.argv.pop(1)).resolve())
 WORKER = str(Path(__file__).parent / 'fixtures' / 'terminal_worker.py')
@@ -64,6 +65,31 @@ def cases(cols):
                    b'two', b'\r\n\x1b[2Kafter save\r\n']
     chunks += [b'finished\r\n']
     return chunks
+
+
+class FixtureSynchronization(unittest.TestCase):
+    def test_split_output_and_repeated_markers(self):
+        sync = FixtureSync([(1, rb'ready'), (2, rb'ready')])
+        try:
+            directory = Path(sync.directory.name)
+            sync.observe(b'rea')
+            self.assertFalse((directory / '1').exists())
+            sync.observe(b'ready')
+            self.assertTrue((directory / '1').exists())
+            sync.observe(b'ready')
+            self.assertFalse((directory / '2').exists())
+            sync.observe(b'readyready')
+            self.assertTrue((directory / '2').exists())
+        finally:
+            sync.close()
+
+    def test_interrupted_stage_stays_open(self):
+        sync = FixtureSync([(1, None)])
+        try:
+            sync.observe(b'any output')
+            self.assertFalse((Path(sync.directory.name) / '1').exists())
+        finally:
+            sync.close()
 
 
 class TerminalOutput(unittest.TestCase):

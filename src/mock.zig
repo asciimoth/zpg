@@ -1,4 +1,5 @@
 const std = @import("std");
+const process_wait = @import("process_wait.zig");
 const output = @import("output.zig");
 const signals = @import("signals.zig");
 const reader = @import("stream_reader.zig");
@@ -296,22 +297,15 @@ fn runWorkerProcess(
     var waiter = try io.concurrent(waitChild, .{ io, &child, &exited });
     defer _ = waiter.cancel(io) catch {};
 
-    var shutdown_ticks: ?usize = null;
+    var shutdown: process_wait.Shutdown = .{};
     while (!exited.load(.acquire)) {
-        if (shutdown_ticks) |ticks| {
-            if (ticks == 100) std.posix.kill(-pid, .KILL) catch {};
-            shutdown_ticks = ticks + 1;
-        } else if (signals.get() != 0 or failed.load(.acquire)) {
-            std.posix.kill(-pid, .TERM) catch {};
-            shutdown_ticks = 0;
+        if (shutdown.next_signal(std.Io.Clock.awake.now(io), signals.get() != 0 or failed.load(.acquire))) |sig| {
+            std.posix.kill(-pid, sig) catch {};
         }
         try io.sleep(.fromMilliseconds(20), .awake);
     }
     const result = try waiter.await(io);
-    var drain_ticks: usize = 0;
-    while (done.load(.acquire) != 2 and drain_ticks < 100) : (drain_ticks += 1)
-        try io.sleep(.fromMilliseconds(20), .awake);
-    const truncated = done.load(.acquire) != 2;
+    const truncated = !try process_wait.wait_for_drain(io, &done, 2);
     out.cancel(io);
     err.cancel(io);
     if (truncated) try output.print(io, "zpg: mock worker {s} pipe drain timeout\n", .{kind});

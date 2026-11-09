@@ -1,8 +1,19 @@
 import os
 import signal
 import stat
+import subprocess
 import sys
 import time
+from sync import checkpoint
+
+
+def report(completed, total, name=None):
+    args = ['zpg', '--report', str(completed), str(total)]
+    if name is not None:
+        args += ['--name', name]
+    fd = os.environ.get('ZIG_PROGRESS')
+    subprocess.run(args, pass_fds=() if fd is None else (int(fd),),
+                   check=True, timeout=5)
 
 mode = sys.argv[1]
 if mode == 'args':
@@ -20,10 +31,13 @@ elif mode == 'tty':
             label += f' size={size.columns}x{size.lines}'.encode()
             label = b'\x1b[32m' + label + b'\x1b[0m'
         os.write(fd, label + b'\n')
-elif mode == 'stdin':
+elif mode in ('stdin', 'stdin-progress'):
     while chunk := sys.stdin.buffer.read(4096):
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
+    if mode == 'stdin-progress':
+        report(1, 2, 'input-progress')
+        checkpoint('progress')
 elif mode == 'volume':
     for i in range(3000):
         token = bytes(97 + int(digit, 16) for digit in format(i, '08x'))
@@ -54,7 +68,9 @@ elif mode in ('stop', 'stubborn'):
 elif mode == 'descendant':
     pid = os.fork()
     if pid == 0:
-        time.sleep(4)
+        checkpoint('release')
+        from pathlib import Path
+        (Path(os.environ['ZPG_TEST_SYNC']) / 'released').touch()
         os._exit(0)
     print('parent done', flush=True)
 elif mode == 'signal':
@@ -73,20 +89,35 @@ elif mode in ('file-io', 'file-seek'):
             else:
                 source.read(position - source.tell())
             os.write(1, b'copy step\n')
-            time.sleep(.65)
+            checkpoint(fraction)
     # The estimate must return to unknown after the input closes.
-    time.sleep(.65)
+    checkpoint('closed')
 elif mode == 'output-only':
     with open(sys.argv[2], 'wb') as target:
         target.write(b'x' * 4096)
         target.flush()
-        time.sleep(.65)
+        checkpoint('unknown')
 elif mode == 'file-churn':
     deadline = time.monotonic() + 1
     while time.monotonic() < deadline:
         with open(sys.argv[2], 'rb', buffering=0) as source:
             source.read(256)
     print('churn complete')
+
+elif mode == 'reports':
+    for completed, name in [(1, None), (3, 'compile'), (4, 'done')]:
+        report(completed, 4, name)
+        checkpoint(completed)
+elif mode == 'native-report':
+    report(1, 4, 'native')
+    checkpoint('native')
+elif mode == 'streams':
+    os.write(1, b'stdout marker\n')
+    os.write(2, b'stderr marker\n')
+    report(1, 2, 'stream-progress')
+    checkpoint('progress')
+    os.write(1, b'stdout tail\n')
+    os.write(2, b'stderr tail\n')
 
 elif mode == 'test-progress':
     import struct
@@ -123,7 +154,7 @@ elif mode == 'controls':
         b'abcdefghij\rXY',
         b'\r\x1b[2Kbar 100%\n',
         b'footer old\nitems 0/2\r\x1b[A',
-        b'\x1b[',  # Force a display tick inside an incomplete CSI sequence.
+        b'\x1b[',  # The focused terminal suite also handshakes at this boundary.
         b'2Kfooter done\x1b[B\r\x1b[2Kitems 2/2\x1b[A\r',
         b'\x1b[B\r\nsaved: \x1b7\nscratch',
         b'\r\x1b[2K\x1b8restored\n',

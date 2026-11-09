@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from terminal_model import Terminal
+from fixture_sync import FixtureSync
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
 render_probe = str(pathlib.Path(sys.argv[2]).resolve())
@@ -22,10 +23,24 @@ report_demo = str(pathlib.Path(__file__).parent.parent / 'examples' / 'report-de
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 env.pop('UNICODE_PROGRESS_BAR', None)
 env.pop('ZPG_NO_PROGRESS', None)
+env.pop('ZPG_TEST_SYNC', None)
 
 # The full demo sleeps for about four seconds before terminal updates and
 # process cleanup. Allow extra time for delayed wakeups on CI runners.
 MOCK_TIMEOUT = 15
+
+def read_pid(stream, timeout=5):
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while b'\n' not in data:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, ('worker did not report its PID', data)
+        ready, _, _ = select.select([stream], [], [], remaining)
+        assert ready, ('worker did not report its PID', data)
+        chunk = os.read(stream.fileno(), 4096)
+        assert chunk, ('worker exited before reporting its PID', data)
+        data.extend(chunk)
+    return int(data.strip())
 
 def capture_output(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -174,7 +189,7 @@ for sig, mode in [(signal.SIGINT, 'stop'), (signal.SIGTERM, 'stop'), (signal.SIG
     p = subprocess.Popen([exe, sys.executable, fixture, mode], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
     ready, _, _ = select.select([p.stdout], [], [], 5)
     assert ready
-    pid = int(p.stdout.readline())
+    pid = read_pid(p.stdout)
     start = time.monotonic()
     p.send_signal(sig)
     _, log = p.communicate(timeout=8)
@@ -187,19 +202,26 @@ for sig, mode in [(signal.SIGINT, 'stop'), (signal.SIGTERM, 'stop'), (signal.SIG
         pass
     else:
         raise AssertionError('child not reaped')
-# A descendant can keep inherited capture pipes open after zpg exits. Use files
-# so the elapsed time measures zpg's exit, not the descendant's pipe lifetime.
-with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-    start = time.monotonic()
-    p = subprocess.run([exe, '--name', 'worker', sys.executable, fixture,
-                        'descendant'], stdout=stdout, stderr=stderr, env=env,
-                       timeout=15)
-    elapsed = time.monotonic() - start
-    stdout.seek(0)
-    stderr.seek(0)
-    log = stderr.read()
-    assert p.returncode == 0 and stdout.read() == b'parent done\n', (p.returncode, log)
-    assert b'pipe drain timeout' in log and elapsed < 3.5, (elapsed, log)
+# Keep the descendant alive until the check ends. A fixed child lifetime can
+# expire before the supervisor's drain deadline on a busy runner.
+with tempfile.TemporaryDirectory() as directory:
+    try:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            p = subprocess.run([exe, '--name', 'worker', sys.executable, fixture,
+                                'descendant'], stdout=stdout, stderr=stderr,
+                               env=dict(env, ZPG_TEST_SYNC=directory), timeout=8)
+            stdout.seek(0)
+            stderr.seek(0)
+            log = stderr.read()
+            assert p.returncode == 0 and stdout.read() == b'parent done\n', (p.returncode, log)
+            assert b'pipe drain timeout' in log, log
+    finally:
+        (pathlib.Path(directory) / 'release').touch()
+        # Wait for the descendant to acknowledge release before removing it.
+        deadline = time.monotonic() + 5
+        while not (pathlib.Path(directory) / 'released').exists():
+            assert time.monotonic() < deadline, 'descendant did not exit'
+            time.sleep(.01)
 mock_result = capture_output('zpg', '--mock')
 assert b'mock stderr:' not in mock_result.stdout
 assert b'mock stdout:' not in mock_result.stderr
@@ -237,14 +259,15 @@ p = subprocess.run([exe, 'zpg', '--mock'], input=mock_input,
                    capture_output=True, env=env, timeout=5)
 assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
 # Ctrl-C must stop a mock even when its input pipe remains open and idle.
-for initial in (b'', b'first\n'):
+for initial in (b'first\n', b'first\npartial'):
     p = subprocess.Popen([exe, '--mock'], stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
-        if initial:
-            p.stdin.write(initial)
-            p.stdin.flush()
-        time.sleep(.2)
+        p.stdin.write(initial)
+        p.stdin.flush()
+        ready, _, _ = select.select([p.stdout], [], [], 5)
+        assert ready, 'mock did not echo its first input line'
+        assert os.read(p.stdout.fileno(), 4096) == b'first\n'
         p.send_signal(signal.SIGINT)
         assert p.wait(timeout=3) == 130
     finally:
@@ -258,14 +281,17 @@ for initial in (b'', b'first\n'):
 p = subprocess.Popen([exe, '--mock'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                      bufsize=0)
 worker_pids = set()
+worker_log = bytearray()
 deadline = time.monotonic() + 8
 while len(worker_pids) < 3 and time.monotonic() < deadline:
     ready, _, _ = select.select([p.stderr], [], [], .1)
     if ready:
-        line = p.stderr.readline()
-        match = re.search(rb'mock worker (?:indexer|compiler|uploader) \(pid (\d+)\): started', line)
-        if match:
-            worker_pids.add(int(match.group(1)))
+        data = os.read(p.stderr.fileno(), 65536)
+        if not data:
+            break
+        worker_log.extend(data)
+        worker_pids.update(int(pid) for pid in re.findall(
+            rb'mock worker (?:indexer|compiler|uploader) \(pid (\d+)\): started', worker_log))
 assert len(worker_pids) == 3
 p.send_signal(signal.SIGINT)
 _, tail = p.communicate(timeout=8)
@@ -307,14 +333,11 @@ assert p.wait(timeout=2) == 0
 assert b'\x1b' in log, log
 frames = [frame.split(b'\x1b[?2026l', 1)[0]
           for frame in log.split(b'\x1b[?2026h')]
-assert any(all(name in frame for name in
-               (b'indexer', b'compiler', b'uploader')) for frame in frames)
-for node in (b'discover', b'scan inputs', b'inspect metadata', b'build',
-             b'assets', b'transform', b'compress', b'code', b'generate',
-             b'resolve symbols', b'verify', b'publish', b'upload'):
-    assert node in log, node
-for node in (b'indexer batch', b'compiler batch', b'uploader batch'):
-    assert node in log, node
+# Short demo stages can finish between redraws. Exact labels and counts are
+# checked below with fixtures that wait for the displayed frame.
+assert any(b'zpg' in frame for frame in frames), frames
+for name in (b'indexer', b'compiler', b'uploader'):
+    assert b'mock worker ' + name + b': complete' in log, (name, log)
 assert b'mock stdout:' in p.communicate(timeout=2)[0] and b'mock stderr:' in log
 assert b'[zpg:' not in log and b'exited with code' not in log
 master, slave = pty.openpty()
@@ -322,20 +345,29 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
 p = subprocess.Popen([exe, '--no-progress', 'zpg', '--mock'], stdout=slave, stderr=slave, env=terminal_env)
 os.close(slave)
 log = bytearray()
-while True:
-    ready, _, _ = select.select([master], [], [], 5)
-    assert ready, 'no-progress terminal test timed out'
-    try:
-        data = os.read(master, 65536)
-    except OSError as e:
-        if e.errno == errno.EIO:
+deadline = time.monotonic() + MOCK_TIMEOUT
+try:
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], .1)
+        if not ready:
+            continue
+        try:
+            data = os.read(master, 65536)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break
+            raise
+        if not data:
             break
-        raise
-    if not data:
-        break
-    log.extend(data)
-os.close(master)
-assert p.wait(timeout=2) == 0, log
+        log.extend(data)
+    else:
+        raise AssertionError('no-progress terminal test timed out')
+    assert p.wait(timeout=2) == 0, log
+finally:
+    os.close(master)
+    if p.poll() is None:
+        p.kill()
+        p.wait()
 assert b'\x1b[?2026h' not in log and b'\x1b[J' not in log, log
 assert b'\x1b[32mmock stdout:' in log and b'\x1b[31mmock stderr:' in log, log
 print('integration checks passed (including terminal progress)')
@@ -347,11 +379,21 @@ def progress_cleared(capture):
 
 
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
-                     stop_after=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL,
-                     timeout=5):
+                     stop_when=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL,
+                     timeout=15, checkpoints=None, on_output=None):
+    if (checkpoints is None and render_probe in args and '--no-progress' not in args
+            and (extra_env or {}).get('TERM') != 'dumb' and rows >= 5 and cols >= 24):
+        frame = rb'\x1b\[\?2026h.*?\x1b\[\?2026l'
+        # Hold each count until it is drawn. Wide bar displays must also show
+        # two different spinner glyphs before the probe advances to completion.
+        spinning = rb'unknown (\S+) 2 done.*unknown (?!\1 )\S+ 2 done'
+        checkpoints = [(0, rb'3/4' if cols >= 80 else frame),
+                       (1, spinning if cols >= 80 and 'tree' not in args else frame),
+                       (2, rb'7/4' if cols >= 80 and not resize else frame)]
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
-    child_env = dict(terminal_env, **(extra_env or {}))
+    sync = FixtureSync(checkpoints)
+    child_env = dict(terminal_env, **(extra_env or {}), **sync.environment())
     process = subprocess.Popen([exe, *args],
                                stdout=slave if stdout_pattern is None else subprocess.PIPE,
                                stdin=stdin, stderr=slave, env=child_env)
@@ -362,10 +404,10 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
     stopped = False
     try:
         while time.monotonic() - start < timeout:
-            if stop_after and not stopped and time.monotonic() - start > stop_after:
+            if stop_when and not stopped and re.search(stop_when, captured, re.S):
                 process.send_signal(signal.SIGINT)
                 stopped = True
-            if resize and not resized and time.monotonic() - start > .5:
+            if resize and not resized and b'3/4' in captured:
                 fcntl.ioctl(master, termios.TIOCSWINSZ,
                             struct.pack('HHHH', *resize, 0, 0))
                 resized = True
@@ -381,10 +423,13 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
             if not data:
                 break
             captured.extend(data)
+            sync.observe(captured)
+            if on_output is not None:
+                on_output(captured)
         else:
             raise AssertionError(f'terminal test timed out after {timeout}s: {args!r}')
         stdout, _ = process.communicate(timeout=2)
-        assert process.returncode == code, (process.returncode, captured)
+        assert process.returncode == code, (args, process.returncode, captured[-8192:])
         if stdout_pattern is not None:
             assert re.fullmatch(stdout_pattern, stdout, re.S), stdout
         return bytes(captured)
@@ -393,6 +438,7 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
         if process.poll() is None:
             process.kill()
             process.wait()
+        sync.close()
 
 
 # Exercise stdin with active progress, including the macOS spawn path.
@@ -421,13 +467,17 @@ finally:
 expected_logs = b'log line\n' * 12 + b'partial continued\n'
 input_read, input_write = os.pipe()
 try:
-    os.write(input_write, b'alpha\nbeta\ngamma\n')
-finally:
-    os.close(input_write)
-try:
-    capture = terminal_capture(['--mock'], stdin=input_read,
-                               stdout_pattern=b'alpha\nbeta\ngamma\n')
-    assert b'input lines' in capture, capture
+    with os.fdopen(input_write, 'wb', buffering=0) as input_writer:
+        input_writer.write(b'alpha\nbeta\ngamma\n')
+
+        def finish_mock_input(data):
+            if b'input lines' in data:
+                input_writer.close()
+
+        capture = terminal_capture(['--mock'], stdin=input_read,
+                                   stdout_pattern=b'alpha\nbeta\ngamma\n',
+                                   on_output=finish_mock_input)
+        assert b'input lines' in capture, capture
 finally:
     os.close(input_read)
 if sys.platform.startswith('linux'):
@@ -439,7 +489,10 @@ if sys.platform.startswith('linux'):
         # process-group discovery. Nested supervisors must forward estimates.
         for command in [args, ['sh', '-c', '"$@"; result=$?; exit "$result"', 'sh', *args],
                         [exe, '--guess', *args]]:
-            capture = terminal_capture(['--guess', *command], cols=120)
+            capture = terminal_capture(['--guess', *command], cols=120,
+                                       checkpoints=[(1, rb'25% 256/1024'),
+                                                    (3, rb'75% 768/1024'),
+                                                    ('closed', rb'I/O estimate \(unknown\)')])
             assert b'I/O estimate (bytes): input.bin' in capture, capture
             assert b'25% 256/1024' in capture, capture
             assert b'75% 768/1024' in capture, capture
@@ -447,15 +500,20 @@ if sys.platform.startswith('linux'):
             assert b'I/O estimate (unknown)' in capture[last_known:], capture
             logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
             assert logs == b'copy step\r\n' * 2, logs
-        capture = terminal_capture(['--guess', '--renderer', 'tree', *args])
+        capture = terminal_capture(['--guess', '--renderer', 'tree', *args],
+                                   checkpoints=[(1, rb'I/O estimate \(bytes\): input.bin'),
+                                                (3, rb'I/O estimate \(bytes\): input.bin'),
+                                                ('closed', rb'I/O estimate \(unknown\)')])
         assert b'I/O estimate (bytes): input.bin' in capture, capture
         capture = terminal_capture(['--guess', '--no-progress', *args])
         assert capture == b'copy step\r\n' * 2, capture
         assert run('--guess', *args) == b'copy step\n' * 2
         capture = terminal_capture(['--guess', sys.executable, fixture,
-                                    'output-only', str(source) + '.out'])
+                                    'output-only', str(source) + '.out'],
+                                   checkpoints=[('unknown', rb'I/O estimate \(unknown\)')])
         assert b'I/O estimate (unknown)' in capture and b'100%' not in capture, capture
-        capture = terminal_capture(['--guess', *args], stop_after=.8, code=130)
+        capture = terminal_capture(['--guess', *args], stop_when=rb'25% 256/1024', code=130,
+                                   checkpoints=[(1, None)])
         assert b'25% 256/1024' in capture and progress_cleared(capture), capture
         # Descriptors can close after a proc entry opens. Such races must not
         # add diagnostics or debug stack traces to the command's log.
@@ -469,21 +527,26 @@ if sys.platform.startswith('linux'):
         for renderer in ('bars', 'tree'):
             capture = terminal_capture(['--guess', '--renderer', renderer,
                                         sys.executable, fixture, 'file-io', str(unusual)],
-                                       cols=120)
+                                       cols=120, checkpoints=[(1, re.escape('line??[2Jé.bin'.encode())),
+                                                              (3, re.escape('line??[2Jé.bin'.encode())),
+                                                              ('closed', rb'I/O estimate \(unknown\)')])
             assert 'line??[2Jé.bin'.encode() in capture, capture
             assert b'\x1b[2J' not in capture, capture
         # Sparse files exercise >4 GiB counts without substantial disk use.
         with source.open('wb') as sparse:
             sparse.truncate(1 << 34)
         capture = terminal_capture(['--guess', sys.executable, fixture,
-                                    'file-seek', str(source)], cols=120)
+                                    'file-seek', str(source)], cols=120,
+                                   checkpoints=[(1, rb'25% 4194304/16777216'),
+                                                (3, rb'75% 12582912/16777216'),
+                                                ('closed', rb'I/O estimate \(unknown\)')])
         assert b'I/O estimate (KiB): input.bin' in capture, capture
         assert b'25% 4194304/16777216' in capture, capture
         assert b'75% 12582912/16777216' in capture, capture
 
 # Native reports remain usable when the separate I/O estimate is enabled.
-capture = terminal_capture(['--guess', 'sh', '-c',
-                            'zpg --report 1 4 --name native; sleep .65'])
+capture = terminal_capture(['--guess', sys.executable, fixture, 'native-report'],
+                           checkpoints=[('native', rb'native \[###---------\] 25% 1/4')])
 assert b'native [###---------] 25% 1/4' in capture, capture
 # Every spawned child needs the descriptor and its environment variable,
 # including a child of a nested supervisor. Check this without frame timing.
@@ -498,30 +561,38 @@ terminal_capture([sys.executable, fixture, 'exit'], code=37)
 terminal_capture([sys.executable, fixture, 'signal'], code=143)
 # A descendant can also hold PTY slaves open. The capture timeout must still
 # stop zpg, without waiting for those descendants to close their descriptors.
-start = time.monotonic()
-capture = terminal_capture(['--no-progress', sys.executable, fixture, 'descendant'])
-assert b'parent done\r\n' in capture and b'pipe drain timeout' in capture, capture
-assert time.monotonic() - start < 3.5
+with tempfile.TemporaryDirectory() as directory:
+    try:
+        capture = terminal_capture(['--no-progress', sys.executable, fixture, 'descendant'],
+                                   extra_env={'ZPG_TEST_SYNC': directory}, timeout=8)
+        assert b'parent done\r\n' in capture and b'pipe drain timeout' in capture, capture
+    finally:
+        (pathlib.Path(directory) / 'release').touch()
+        deadline = time.monotonic() + 5
+        while not (pathlib.Path(directory) / 'released').exists():
+            assert time.monotonic() < deadline, 'descendant did not exit'
+            time.sleep(.01)
 # The demo can exit before its final report is drawn. Check completion and
 # drawing here; the report fixture below keeps exact counts visible before exit.
 demo_capture = terminal_capture(['--name', 'shell demo', 'sh', report_demo])
 assert b'\x1b[?2026h' in demo_capture, demo_capture
 assert b'shell demo: complete\r\n' in demo_capture, demo_capture
 for worker_name in (b'indexer', b'compiler', b'uploader'):
-    assert worker_name + b': build' in demo_capture, (worker_name, demo_capture)
+    assert worker_name + b': finish complete' in demo_capture, (worker_name, demo_capture)
 # Reports must remain visible after each short-lived reporter exits, and
 # reach either renderer through a nested supervisor.
-report_script = ('set -e; zpg --report 1 4; sleep .5; '
-                 'zpg --report 3 4 --name compile; sleep .5; '
-                 'zpg --report 4 4 --name done; sleep .5')
+report_command = [sys.executable, fixture, 'reports']
+report_steps = [(1, rb'25% 1/4'), (3, rb'compile .*75% 3/4'), (4, rb'done .*100% 4/4')]
 for prefix in [[], [exe]]:
-    report_capture = terminal_capture([*prefix, '--name', 'script', 'sh', '-c', report_script])
+    report_capture = terminal_capture([*prefix, '--name', 'script', *report_command],
+                                      checkpoints=report_steps)
     assert b'script [###---------] 25% 1/4' in report_capture, report_capture
     assert b'compile [#########---] 75% 3/4' in report_capture, report_capture
     assert b'done [############] 100% 4/4' in report_capture, report_capture
-report_capture = terminal_capture(['--renderer', 'tree', 'sh', '-c', report_script])
+report_capture = terminal_capture(['--renderer', 'tree', *report_command],
+                                  checkpoints=[(1, rb'1/4'), (3, rb'compile'), (4, rb'done')])
 assert b'compile' in report_capture and b'done' in report_capture, report_capture
-report_capture = terminal_capture(['--no-progress', 'sh', '-c', report_script])
+report_capture = terminal_capture(['--no-progress', *report_command])
 assert report_capture == b'', report_capture
 assert run('--renderer', 'bars', render_probe) == expected_logs
 capture = terminal_capture([render_probe], rows=8)
@@ -596,7 +667,7 @@ def replay_terminal(data, rows, cols, snapshots=None):
 
 visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
 assert visible_logs == expected_logs.decode().splitlines(), visible_logs
-capture = terminal_capture([render_probe], stop_after=.55, code=130)
+capture = terminal_capture([render_probe], stop_when=rb'75% 3/4', code=130)
 assert b'75% 3/4' in capture and progress_cleared(capture)
 
 # A resize must constrain subsequent frames without a signal handler.
@@ -615,7 +686,7 @@ assert b'[#########---] 75% 3/4' in capture
 capture = terminal_capture([*custom_args, exe, '--bar-style', 'ascii', render_probe])
 assert ('█' * 9 + '    75% 3/4').encode() in capture
 assert b'[#########---]' not in capture
-capture = terminal_capture([*custom_args, '--mock'], stop_after=.8, code=130,
+capture = terminal_capture([*custom_args, '--mock'], stop_when='█'.encode(), code=130,
                            stdout_pattern=rb'(mock stdout: work in progress\n|mock worker: processing item\n)+')
 assert '█'.encode() in capture
 capture = terminal_capture(['--renderer', 'tree', render_probe])
@@ -657,7 +728,8 @@ print('custom renderer checks passed (including resize and partial log lines)')
 # Give stdout and stderr different terminals so the tests can identify exactly
 # which descriptor receives progress. Non-terminal streams go to real files.
 def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
-                         extra_env=None, timeout=5, convert=False):
+                         extra_env=None, timeout=15, convert=False, checkpoints=None, checkpoint_stream='stderr'):
+    sync = FixtureSync(checkpoints)
     terminals = {}
     files = {}
     destinations = {}
@@ -680,7 +752,7 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                 files[name] = tempfile.TemporaryFile()
                 destinations[name] = files[name]
         process = subprocess.Popen([exe, *args], stdin=stdin, **destinations,
-                                   env=dict(terminal_env, **(extra_env or {})))
+                                   env=dict(terminal_env, **(extra_env or {}), **sync.environment()))
         for _, slave in terminals.values():
             os.close(slave)
         active = {master: name for name, (master, _) in terminals.items()}
@@ -698,9 +770,11 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                     data = b''
                 if data:
                     captured[active[master]].extend(data)
+                    sync.observe(captured[checkpoint_stream or 'stderr'])
                 else:
                     del active[master]
-        assert process.wait(timeout=max(0, deadline - time.monotonic())) == 0
+        returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        assert returncode == 0, (args, returncode, captured)
         for name, file in files.items():
             file.seek(0)
             captured[name].extend(file.read())
@@ -715,6 +789,7 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                 os.close(slave)
         for file in files.values():
             file.close()
+        sync.close()
 
 
 # The mock draws independently on stdout and stderr. A nested supervisor can
@@ -801,9 +876,7 @@ captures = capture_destinations(['--no-progress', exe, sys.executable, fixture, 
                                 True, True)
 assert captures == dict(stdout=expected + b'x' * 20000, stderr=expected.upper()), captures
 
-stream_script = ('printf "stdout marker\\n"; printf "stderr marker\\n" >&2; '
-                 'zpg --report 1 2 --name stream-progress; sleep .3; '
-                 'printf "stdout tail\\n"; printf "stderr tail\\n" >&2; sleep .15')
+stream_command = [sys.executable, fixture, 'streams']
 for renderer in ('bars', 'tree'):
     for stdout_tty, stderr_tty, choice, selected in [
             (False, False, 'auto', None),
@@ -814,8 +887,11 @@ for renderer in ('bars', 'tree'):
             (True, True, 'stderr', 'stderr'),
             (False, True, 'stdout', None),
             (True, False, 'stderr', None)]:
-        args = ['--renderer', renderer, '--progress-stream', choice, 'sh', '-c', stream_script]
-        captures = capture_destinations(args, stdout_tty, stderr_tty)
+        args = ['--renderer', renderer, '--progress-stream', choice, *stream_command]
+        captures = capture_destinations(
+            args, stdout_tty, stderr_tty,
+            checkpoints=[('progress', rb'stream-progress')] if selected else None,
+            checkpoint_stream=selected)
         for name, data in captures.items():
             marker = (name + ' marker\n').encode()
             if name == selected:
@@ -825,13 +901,14 @@ for renderer in ('bars', 'tree'):
             else:
                 assert data == marker + (name + ' tail\n').encode(), (args, name, data)
     for options, overrides in [(['--no-progress'], {}), ([], {'TERM': 'dumb'})]:
-        captures = capture_destinations(['--renderer', renderer, *options, 'sh', '-c', stream_script],
+        captures = capture_destinations(['--renderer', renderer, *options, *stream_command],
                                         True, True, extra_env=overrides)
         assert captures == dict(stdout=b'stdout marker\nstdout tail\n', stderr=b'stderr marker\nstderr tail\n'), captures
     # The outer process selects the terminal, even with conflicting inner flags.
     captures = capture_destinations(['--renderer', renderer, '--progress-stream', 'stdout',
-                                     exe, '--progress-stream', 'stderr', 'sh', '-c', stream_script],
-                                    True, True)
+                                     exe, '--progress-stream', 'stderr', *stream_command],
+                                    True, True, checkpoints=[('progress', rb'stream-progress')],
+                                    checkpoint_stream='stdout')
     assert b'stream-progress' in captures['stdout']
     assert captures['stderr'] == b'stderr marker\nstderr tail\n'
     # A pipe on stdin and a file on stdout must preserve all bytes while stderr
@@ -844,13 +921,17 @@ for renderer in ('bars', 'tree'):
         finally:
             os.close(write_fd)
         try:
-            captures = capture_destinations(['--renderer', renderer, *prefix, 'sh', '-c',
-                                             'cat; zpg --report 1 2 --name input-progress; sleep .4'],
-                                            False, True, stdin=read_fd)
+            # Each nested collector has a startup delay. Keep the worker alive
+            # until its progress reaches the terminal, even on a slow runner.
+            captures = capture_destinations(
+                ['--renderer', renderer, *prefix, sys.executable, fixture, 'stdin-progress'],
+                False, True, stdin=read_fd,
+                checkpoints=[('progress', rb'input-progress')])
         finally:
             os.close(read_fd)
-        assert captures['stdout'] == input_bytes
-        assert b'input-progress' in captures['stderr'] and b'\x1b' in captures['stderr']
+        assert captures['stdout'] == input_bytes, (renderer, prefix, captures)
+        assert b'input-progress' in captures['stderr'] and b'\x1b' in captures['stderr'], (
+            renderer, prefix, captures)
 print('separate streams and progress terminal selection checks passed')
 
 # The same terminal can be reached by both descriptors. Verify that stdout
@@ -924,7 +1005,7 @@ assert (p.returncode, p.stdout) == (0, b'input\x00bytes\n'), p
 p = subprocess.Popen([exe, '--test', sys.executable, fixture, 'stop'],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 try:
-    assert p.stdout.readline().strip().isdigit()
+    assert read_pid(p.stdout) > 0
     p.send_signal(signal.SIGTERM)
     _, log = p.communicate(timeout=5)
     assert p.returncode == 143, (p.returncode, log)
