@@ -651,27 +651,13 @@ for renderer in ('bars', 'tree'):
                          stream='stdout' if fd == '1' else 'stderr')
             assert raw == direct.replace(b'\n', b'\r\n'), (raw, direct)
 
-# The mock exercises both methods itself and through a nested supervisor.
-for prefix in ([], [exe]):
-    mock_capture = terminal_capture([*prefix, '--mock'], rows=24, cols=100,
-                                    timeout=MOCK_TIMEOUT)
-    mock_visible = [line for line in replay_terminal(mock_capture, 24, 100) if line]
-    # The two capture PTYs can deliver their final lines in either order.
-    assert sorted(mock_visible[-5:]) == sorted([
-        'mock carriage return: [####] 100%',
-        'mock footer: complete', 'mock footer items: 2/2',
-        'mock stdout: complete', 'mock stderr: complete',
-    ]), mock_visible[-10:]
-    assert 'mock footer: waiting' not in mock_visible
-    assert 'mock footer: running' not in mock_visible
-
 print('custom renderer checks passed (including resize and partial log lines)')
 
 
 # Give stdout and stderr different terminals so the tests can identify exactly
 # which descriptor receives progress. Non-terminal streams go to real files.
 def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
-                         extra_env=None, timeout=5):
+                         extra_env=None, timeout=5, convert=False):
     terminals = {}
     files = {}
     destinations = {}
@@ -684,7 +670,10 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                 terminals[name] = (master, slave)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 12, 80, 0, 0))
                 attributes = termios.tcgetattr(slave)
-                attributes[1] &= ~termios.OPOST
+                if convert:
+                    attributes[1] |= termios.OPOST | termios.ONLCR
+                else:
+                    attributes[1] &= ~termios.OPOST
                 termios.tcsetattr(slave, termios.TCSANOW, attributes)
                 destinations[name] = slave
             else:
@@ -726,6 +715,23 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                 os.close(slave)
         for file in files.values():
             file.close()
+
+
+# The mock draws independently on stdout and stderr. A nested supervisor can
+# forward those streams in a different order, even between a write and its LF.
+# Use separate terminals so each animation has its own cursor and byte order.
+for prefix in ([], [exe]):
+    captures = capture_destinations([*prefix, '--mock'], True, True,
+                                    timeout=MOCK_TIMEOUT, convert=True)
+    for name, expected_lines in [
+            ('stdout', ['mock carriage return: [####] 100%', 'mock stdout: complete']),
+            ('stderr', ['mock footer: complete', 'mock footer items: 2/2',
+                        'mock stderr: complete'])]:
+        visible = [line for line in replay_terminal(captures[name], 12, 80) if line]
+        assert visible[-len(expected_lines):] == expected_lines, (prefix, name, visible[-10:])
+        assert not any('mock footer: waiting' in line or 'mock footer: running' in line
+                       for line in visible), (prefix, name, visible[-10:])
+print('mock terminal animations passed (including nested capture)')
 
 
 # The fixed mock demo colors each stream only when that stream is a terminal.
