@@ -23,6 +23,10 @@ env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.envi
 env.pop('UNICODE_PROGRESS_BAR', None)
 env.pop('ZPG_NO_PROGRESS', None)
 
+# The full demo sleeps for about four seconds before terminal updates and
+# process cleanup. Allow extra time for delayed wakeups on CI runners.
+MOCK_TIMEOUT = 15
+
 def capture_output(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        stdin=subprocess.DEVNULL, env=env, timeout=15)
@@ -343,7 +347,8 @@ def progress_cleared(capture):
 
 
 def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
-                     stop_after=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL):
+                     stop_after=None, code=0, stdout_pattern=None, stdin=subprocess.DEVNULL,
+                     timeout=5):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
     child_env = dict(terminal_env, **(extra_env or {}))
@@ -356,7 +361,7 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
     resized = False
     stopped = False
     try:
-        while time.monotonic() - start < 5:
+        while time.monotonic() - start < timeout:
             if stop_after and not stopped and time.monotonic() - start > stop_after:
                 process.send_signal(signal.SIGINT)
                 stopped = True
@@ -377,7 +382,7 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
                 break
             captured.extend(data)
         else:
-            raise AssertionError('renderer terminal test timed out')
+            raise AssertionError(f'terminal test timed out after {timeout}s: {args!r}')
         stdout, _ = process.communicate(timeout=2)
         assert process.returncode == code, (process.returncode, captured)
         if stdout_pattern is not None:
@@ -654,7 +659,8 @@ for renderer in ('bars', 'tree'):
 
 # The mock exercises both methods itself and through a nested supervisor.
 for prefix in ([], [exe]):
-    mock_capture = terminal_capture([*prefix, '--mock'], rows=24, cols=100)
+    mock_capture = terminal_capture([*prefix, '--mock'], rows=24, cols=100,
+                                    timeout=MOCK_TIMEOUT)
     mock_visible = [line for line in replay_terminal(mock_capture, 24, 100) if line]
     # The two capture PTYs can deliver their final lines in either order.
     assert sorted(mock_visible[-5:]) == sorted([
@@ -671,7 +677,7 @@ print('custom renderer checks passed (including resize and partial log lines)')
 # Give stdout and stderr different terminals so the tests can identify exactly
 # which descriptor receives progress. Non-terminal streams go to real files.
 def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
-                         extra_env=None):
+                         extra_env=None, timeout=5):
     terminals = {}
     files = {}
     destinations = {}
@@ -695,9 +701,10 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
         for _, slave in terminals.values():
             os.close(slave)
         active = {master: name for name, (master, _) in terminals.items()}
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + timeout
         while active:
-            assert time.monotonic() < deadline, 'stream selection test timed out'
+            assert time.monotonic() < deadline, (
+                f'stream selection test timed out after {timeout}s: {args!r}')
             ready, _, _ = select.select(list(active), [], [], .1)
             for master in ready:
                 try:
@@ -710,7 +717,7 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
                     captured[active[master]].extend(data)
                 else:
                     del active[master]
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=max(0, deadline - time.monotonic())) == 0
         for name, file in files.items():
             file.seek(0)
             captured[name].extend(file.read())
@@ -731,7 +738,8 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
 # Worker logs follow the same rule through the capture PTYs.
 for stdout_tty, stderr_tty in [(False, False), (False, True),
                               (True, False), (True, True)]:
-    captures = capture_destinations(['--no-progress', '--mock'], stdout_tty, stderr_tty)
+    captures = capture_destinations(['--no-progress', '--mock'], stdout_tty, stderr_tty,
+                                    timeout=MOCK_TIMEOUT)
     for name, terminal, color in [('stdout', stdout_tty, b'\x1b[32m'),
                                   ('stderr', stderr_tty, b'\x1b[31m')]:
         data = captures[name]
