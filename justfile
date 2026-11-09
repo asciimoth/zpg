@@ -27,6 +27,11 @@ package:
     env -u GITHUB_TOKEN goreleaser release --snapshot --clean
     python3 tools/package_artifacts.py
 
+# Build and publish a versioned GitHub release. Add DEB/RPM packages to ghrepo when configured.
+[positional-arguments]
+release *args:
+    ./scripts/release.sh "$@"
+
 check: typos
     zig fmt --check build.zig src test/fixtures
     zig build

@@ -137,6 +137,7 @@
                 python3
                 just
                 nixfmt
+                gh
 
                 gnupg
                 nixpkgs-goreleaser.legacyPackages.${system}.goreleaser
