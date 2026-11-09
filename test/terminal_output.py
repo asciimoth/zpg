@@ -85,6 +85,19 @@ class FixtureSynchronization(unittest.TestCase):
         finally:
             sync.close()
 
+    def test_buffered_markers_cannot_release_a_later_stage(self):
+        sync = FixtureSync([(1, rb'ready'), (2, rb'ready')])
+        try:
+            directory = Path(sync.directory.name)
+            sync.observe(b'readyready')
+            self.assertTrue((directory / '1').exists())
+            sync.observe(b'readyready')
+            self.assertFalse((directory / '2').exists())
+            sync.observe(b'readyreadyready')
+            self.assertTrue((directory / '2').exists())
+        finally:
+            sync.close()
+
 
 class TerminalOutput(unittest.TestCase):
     def run_case(self, chunks, *, renderer='bars', nested=False, destination=1,
@@ -195,13 +208,18 @@ class TerminalOutput(unittest.TestCase):
                             if final:
                                 self.assertFalse(any(model.overlay), context)
 
-                    # Wait for the collector's initial delay only once. Each
-                    # following stage spans several normal 16 ms redraw ticks.
-                    drain(.3 if progress else .01)
-                    if any(isinstance(chunk, dict) and chunk.get('unchanged') for chunk in chunks):
+                    # Hold the worker until progress reaches the terminal.
+                    # Nested collectors can take longer than a fixed delay.
+                    if progress and rows > 2 and cols > 1:
                         deadline = time.monotonic() + 3
-                        while not any('__overlay__' in line and '1/2' in line
-                                      for model in models.values() for line in model.lines()):
+                        def initial_progress():
+                            # Nested labels can be clipped by tree indentation.
+                            if not nested and rows >= 5 and cols >= 40:
+                                return any('__overlay__' in line and '1/2' in line
+                                           for model in models.values() for line in model.lines())
+                            return any(any(model.overlay) for model in models.values())
+
+                        while not initial_progress():
                             self.assertLess(time.monotonic(), deadline, 'missing initial progress')
                             drain(.01)
                     connection.sendall(b'!')
@@ -234,6 +252,16 @@ class TerminalOutput(unittest.TestCase):
                                                  destination, models[target].snapshots[frame_start:]))
                                 drain(.01)
                         drain(.15 if settings else (.045 if progress else .001))
+                        if 'hidden' in settings:
+                            # Progress packets arrive separately from child
+                            # output. Shrinking also takes several snapshots.
+                            # Hold this stage until the display has caught up.
+                            deadline = time.monotonic() + 3
+                            while any(any(model.overlay) for model in models.values()) != (not settings['hidden']):
+                                self.assertLess(time.monotonic(), deadline,
+                                                ('progress visibility timeout', index, renderer,
+                                                 settings['hidden']))
+                                drain(.01)
                         compare(index)
                         if settings.get('continuous'):
                             frames = models[target].snapshots[frame_start:]
@@ -361,7 +389,7 @@ class TerminalOutput(unittest.TestCase):
         for renderer in ('bars', 'tree'):
             with self.subTest(renderer=renderer):
                 self.run_case([
-                    b'row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4\r\x1b[4A',
+                    dict(data=b'row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4\r\x1b[4A', hidden=False),
                     dict(data=b'', nodes=4, hidden=True),
                     dict(data=b'', nodes=1, hidden=False),
                     b'\x1b[4B\r\n',

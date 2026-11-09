@@ -22,7 +22,9 @@ class FixtureSync:
             return
         match = re.search(pattern, data[self.offset:], re.S)
         if match is not None:
-            self.offset += match.end()
+            # Everything already captured predates this release. A later
+            # stage must not consume another marker from that same output.
+            self.offset = len(data)
             (Path(self.directory.name) / str(stage)).touch()
             self.current = next(self.pending, None)
 

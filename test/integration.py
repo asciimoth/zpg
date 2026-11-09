@@ -312,7 +312,7 @@ terminal_env.pop('ZIG_PROGRESS', None)
 p = subprocess.Popen([exe, 'zpg', '--mock'], stdout=subprocess.PIPE, stderr=slave, env=terminal_env)
 os.close(slave)
 log = bytearray()
-deadline = time.monotonic() + 10
+deadline = time.monotonic() + MOCK_TIMEOUT
 while time.monotonic() < deadline:
     ready, _, _ = select.select([master], [], [], .1)
     if ready:
@@ -404,13 +404,6 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
     stopped = False
     try:
         while time.monotonic() - start < timeout:
-            if stop_when and not stopped and re.search(stop_when, captured, re.S):
-                process.send_signal(signal.SIGINT)
-                stopped = True
-            if resize and not resized and b'3/4' in captured:
-                fcntl.ioctl(master, termios.TIOCSWINSZ,
-                            struct.pack('HHHH', *resize, 0, 0))
-                resized = True
             ready, _, _ = select.select([master], [], [], .05)
             if not ready:
                 continue
@@ -423,9 +416,18 @@ def terminal_capture(args, rows=12, cols=80, extra_env=None, resize=None,
             if not data:
                 break
             captured.extend(data)
-            sync.observe(captured)
+            # Apply the action before releasing a held fixture stage.
+            if stop_when and not stopped and re.search(stop_when, captured, re.S):
+                process.send_signal(signal.SIGINT)
+                stopped = True
+            if resize and not resized and b'3/4' in captured:
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            struct.pack('HHHH', *resize, 0, 0))
+                resized = True
             if on_output is not None:
                 on_output(captured)
+            if not stopped:
+                sync.observe(captured)
         else:
             raise AssertionError(f'terminal test timed out after {timeout}s: {args!r}')
         stdout, _ = process.communicate(timeout=2)
