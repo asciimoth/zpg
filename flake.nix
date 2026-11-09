@@ -15,6 +15,8 @@
     nixpkgs-goreleaser.url = "github:NixOS/nixpkgs/f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
     git-hooks.url = "github:cachix/git-hooks.nix";
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
+    ghrepo.url = "github:asciimoth/ghrepo";
+    ghrepo.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -23,6 +25,7 @@
       nixpkgs,
       nixpkgs-goreleaser,
       git-hooks,
+      ghrepo,
       ...
     }:
     let
@@ -138,6 +141,7 @@
                 just
                 nixfmt
                 gh
+                ghrepo.packages.${system}.ghrepo
 
                 gnupg
                 nixpkgs-goreleaser.legacyPackages.${system}.goreleaser
