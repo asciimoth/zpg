@@ -4,14 +4,78 @@
 
 [![Demo of zpg showing command output and progress](demo.gif)](https://asciinema.org/a/1271890)
 
-## Usage
+## Installation
 
-`zpg` supports Linux and macOS. Use Zig 0.17.0 to build it. Add `zig-out/bin`
-to `PATH` before you run `zpg`:
+`zpg` supports Linux and macOS. Choose one of these installation methods.
+
+### APT or DNF repository
+
+On Debian or Ubuntu, add the [package repository](https://repo.moth.contact/)
+and install `zpg` with APT:
 
 ```sh
-zig build
-export PATH="$PWD/zig-out/bin:$PATH"
+curl -fsSLo KEY.gpg https://repo.moth.contact/KEY.gpg
+sudo install -m 0644 KEY.gpg /usr/share/keyrings/ghrepo-archive-keyring.gpg
+curl -fsSLo deb.list https://repo.moth.contact/deb.list
+sudo install -m 0644 deb.list /etc/apt/sources.list.d/ghrepo.list
+sudo apt update
+sudo apt install zpg
+```
+
+On Fedora or another DNF system, add the same repository and install `zpg`:
+
+```sh
+curl -fsSLo rpm.repo https://repo.moth.contact/rpm.repo
+sudo install -m 0644 rpm.repo /etc/yum.repos.d/ghrepo.repo
+sudo dnf makecache
+sudo dnf install zpg
+```
+
+### GitHub Releases
+
+Download a package for your system from the
+[GitHub Releases page](https://github.com/asciimoth/zpg/releases). Releases
+include DEB, RPM, and Arch Linux packages, plus Linux binaries. After you
+download one package, install it with the matching command:
+
+```sh
+sudo apt install ./zpg_*.deb
+sudo dnf install ./zpg_*.rpm
+sudo pacman -U ./zpg_*.pkg.tar.zst
+```
+
+Run only the command for your package manager.
+For a raw binary, save the downloaded file as `zpg`, then run
+`sudo install -m 0755 ./zpg /usr/local/bin/zpg`.
+
+### Nix flake
+
+On x86_64 or aarch64 Linux, install the flake package in your Nix profile:
+
+```sh
+nix profile add github:asciimoth/zpg#zpg
+```
+
+To run it without installing it, use
+`nix run github:asciimoth/zpg#zpg -- --mock`.
+
+### Build from source
+
+Install Zig 0.17.0, then build and install `zpg`:
+
+```sh
+git clone https://github.com/asciimoth/zpg.git
+cd zpg
+zig build -Doptimize=ReleaseSafe
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 zig-out/bin/zpg /usr/local/bin/zpg
+```
+
+## Usage
+
+Run `zpg` before the command whose progress you want to see:
+
+```sh
 zpg --name build ./worker --flag value
 zpg --guess cp large.iso /backup/
 zpg --mock
