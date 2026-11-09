@@ -2,7 +2,7 @@
 
 `zpg` runs a command with a progress overlay.
 
-![Demo of zpg showing command output and progress](demo.gif)
+[![Demo of zpg showing command output and progress](demo.gif)](https://asciinema.org/a/1271890)
 
 ## Usage
 
