@@ -10,28 +10,40 @@ fn wait(io: std.Io, child: *std.process.Child, done: *std.atomic.Value(bool)) !s
     defer done.store(true, .release);
     return child.wait(io);
 }
-fn wait_for_drain(io: std.Io, done: *std.atomic.Value(u32)) !bool {
+fn wait_for_drain(io: std.Io, done: *std.atomic.Value(u32), target: u32) !bool {
     const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(2));
-    while (done.load(.acquire) != 2) {
+    while (done.load(.acquire) != target) {
         if (std.Io.Clock.awake.now(io).compare(.gte, deadline)) return false;
         try io.sleep(.fromMilliseconds(20), .awake);
     }
     return true;
 }
 pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
+    const log_file = if (o.test_output) |path| try std.Io.Dir.cwd().createFile(io, path, .{}) else std.Io.File.stderr();
+    defer if (o.test_output != null) log_file.close(io);
+    var test_log: @import("test_log.zig").Log = .{ .file = log_file };
+    const handles = if (o.test_mode) try std.Io.Threaded.pipe2(.{ .CLOEXEC = true }) else null;
+    const test_pipe: ?[2]std.Io.File = if (handles) |fds| .{ .{ .handle = fds[0], .flags = .{ .nonblocking = false } }, .{ .handle = fds[1], .flags = .{ .nonblocking = false } } } else null;
+    defer if (test_pipe) |files| files[0].close(io);
+    var write_open = test_pipe != null;
+    defer if (write_open) test_pipe.?[1].close(io);
     const guard = signals.Guard.install();
     defer guard.restore();
     const term = blk: {
         var display: progress.Progress = .{};
-        const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
+        const root = try display.start(io, o.progress and !o.test_mode, o.progress_stream, o.renderer, o.style, .{
             .root_name = "zpg",
             .refresh_rate_ns = output.progress_refresh_rate,
         });
         defer display.end(io);
         const node = root.start(o.name, 0);
         defer node.end();
-        var child = try child_process.spawn(io, environ, o.argv, node);
+        var child = try child_process.spawnWithProgressFile(io, environ, o.argv, node, if (test_pipe) |files| files[1] else null);
         defer child.kill(io);
+        if (test_pipe) |files| {
+            files[1].close(io);
+            write_open = false;
+        }
         const pid = child.id.?;
         const stdout = child.stdout.?;
         child.stdout = null;
@@ -44,6 +56,8 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         var queue = output.Queue.init(&storage);
         var failed = std.atomic.Value(bool).init(false);
         var done = std.atomic.Value(u32).init(0);
+        var logger: ?std.Io.Future(void) = if (test_pipe) |files| try io.concurrent(@import("test_log.zig").Log.run, .{ &test_log, io, files[0], &done, &failed }) else null;
+        defer if (logger) |*task| task.cancel(io);
         var exited = std.atomic.Value(bool).init(false);
         var writer = try io.concurrent(output.run, .{ io, &queue, &failed });
         defer writer.cancel(io);
@@ -80,7 +94,10 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         const result = try waiter.await(io);
         if (estimator) |*task| task.cancel(io);
         estimator = null;
-        const truncated = !try wait_for_drain(io, &done);
+        const truncated = !try wait_for_drain(io, &done, if (o.test_mode) 3 else 2);
+        if (logger) |*task| task.cancel(io);
+        logger = null;
+        if (o.test_mode and truncated) try test_log.print(io, "progress/output drain timeout; capture incomplete", .{});
         out.cancel(io);
         err.cancel(io);
         queue.close(io);
@@ -89,9 +106,10 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         if (failed.load(.acquire)) return error.StreamFailed;
         break :blk result;
     };
+    if (o.test_mode) try test_log.print(io, "process result={any}; protocol={s}", .{ term, if (test_log.invalid) "invalid" else "no errors detected" });
     if (signals.get() != 0) return @intCast(128 + signals.get());
     return switch (term) {
-        .exited => |code| code,
+        .exited => |code| if (code == 0 and test_log.invalid) 1 else code,
         .signal => |sig| @intCast(@min(255, 128 + @as(u32, @backingInt(sig)))),
         else => 1,
     };
@@ -120,7 +138,7 @@ test "pipe drain expires when sleeps take longer than requested" {
     vtable.now = SlowClock.now;
     vtable.sleep = SlowClock.sleep;
     const io: std.Io = .{ .userdata = &clock, .vtable = &vtable };
-    try std.testing.expect(!try wait_for_drain(io, &clock.done));
+    try std.testing.expect(!try wait_for_drain(io, &clock.done, 2));
     try std.testing.expect(clock.elapsed.toMilliseconds() >= 2000);
     try std.testing.expect(clock.elapsed.toMilliseconds() < 4000);
 }

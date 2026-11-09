@@ -852,3 +852,31 @@ print('separate streams and progress terminal selection checks passed')
 capture = terminal_capture(['--progress-stream', 'stdout', render_probe], rows=8)
 visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
 assert visible_logs == expected_logs.decode().splitlines(), visible_logs
+
+# Test mode reads raw packets even with redirected output and fast child exits.
+for kind, code in [('valid', 0), ('invalid', 1), ('truncated', 1)]:
+    with tempfile.TemporaryDirectory() as directory:
+        path = pathlib.Path(directory) / 'progress.log'
+        p = capture_output('--test', '--test-output', str(path),
+                           sys.executable, fixture, 'test-progress', kind, code=code)
+        assert p.stdout == b'child stdout\x00', p.stdout
+        assert p.stderr == b'child stderr\n', p.stderr
+        log = path.read_bytes()
+        assert b'progress pipe opened' in log, log
+        if kind == 'valid':
+            assert b'snapshot=2 nodes=2 unchanged' in log, log
+            assert b'completed=4 total=4' in log, log
+            assert b'nodes=0 changed' in log, log
+            assert b'\x1b' not in log, log
+            assert b'protocol=no errors detected' in log, log
+        else:
+            assert b'error:' in log and b'protocol=invalid' in log, log
+p = capture_output('--test', sys.executable, fixture, 'exit', code=37)
+assert b'no progress received' in p.stderr, p.stderr
+assert b'process result=' in p.stderr, p.stderr
+p = capture_output('--test', 'sh', '-c', 'zpg --report 3 4 --name work')
+assert b'completed=3 total=4 name="work"' in p.stderr, p.stderr
+for args in [('--test-output', 'log', 'true'), ('--test', '--test-output'),
+             ('--test', '--mock'), ('--test', '--no-progress', 'true'),
+             ('--test', '--guess', 'true'), ('--test', '--report', '0', '1')]:
+    capture_output(*args, code=2)

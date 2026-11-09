@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.link_libc = true;
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/spawn.c") });
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);

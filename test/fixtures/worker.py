@@ -87,3 +87,26 @@ elif mode == 'file-churn':
         with open(sys.argv[2], 'rb', buffering=0) as source:
             source.read(256)
     print('churn complete')
+
+elif mode == 'test-progress':
+    import struct
+    fd = int(os.environ['ZIG_PROGRESS'])
+    def packet(nodes):
+        return (bytes([len(nodes)]) + b''.join(
+            struct.pack('<II120s', completed, total, name)
+            for completed, total, name, parent in nodes)
+            + bytes(parent for completed, total, name, parent in nodes))
+    kind = sys.argv[2]
+    data = packet([(0, 4, b'work', 255), (1, 0, b'child\n\x1b', 0)])
+    if kind == 'invalid':
+        data = data[:-1] + b'\x01'
+    elif kind == 'truncated':
+        data = data[:-3]
+    os.write(fd, data[:7])
+    os.write(fd, data[7:])
+    if kind == 'valid':
+        os.write(fd, data)
+        os.write(fd, packet([(4, 4, b'work', 255)]))
+        os.write(fd, b'\x00')
+    os.write(1, b'child stdout\x00')
+    os.write(2, b'child stderr\n')

@@ -81,6 +81,40 @@ For a custom bar, supply two characters (filled, empty) or four characters
 Styles apply only to the `bars` renderer. For nested `zpg` commands, set the
 renderer and styles on the outermost command.
 
+### Test a progress implementation
+
+Use `--test` to inspect a program's Zig progress packets without a terminal
+overlay. The log goes to stderr, including when stderr is a file or pipe:
+
+```sh
+zpg --test ./worker --flag value
+zpg --test --test-output progress.log ./worker --flag value
+```
+
+`--test-output FILE` creates or replaces the log file. Child stdout and stderr
+keep their original bytes. Use a log file to keep progress separate from child
+stderr.
+
+The log includes pipe open and close events, each snapshot's node count,
+whether the snapshot changed, and the process result. Changed snapshots list
+each node's packet index, parent index, completed count, total count, and name.
+A total of `0` means unknown. Parent `255` marks the root. Names use escaped
+bytes so they cannot insert terminal controls or extra log lines.
+
+The protocol sends whole snapshots, not individual task events. Compare
+snapshots to see tasks appear, change, or disappear. Node indices can change
+between snapshots. An empty snapshot has zero nodes. A program that sends
+no packets is reported as `no progress received`.
+
+Test mode reports truncated packets, reserved node counts and total counts,
+and invalid parent trees. These errors return status 1 if the command succeeds.
+A nonzero command exit status is preserved. These checks do not prove that
+reported counts match the program's work. If descendants keep pipes open,
+the normal drain timeout applies and the log marks the capture incomplete.
+
+Test mode requires a command and cannot be combined with `--mock`, `--report`,
+`--guess`, or `--no-progress`. Display styles do not affect the test log.
+
 ### Progress estimates
 
 Use `--guess` for commands that do not report progress. On Linux, `zpg` estimates

@@ -7,6 +7,10 @@ demo:
     zig build
     PATH="./zig-out/bin:$PATH" zpg zpg --mock
 
+demo-test:
+    zig build
+    PATH="./zig-out/bin:$PATH" zpg --test zpg --mock
+
 demo-report:
     zig build
     PATH="./zig-out/bin:$PATH" zpg --name "shell demo" sh examples/report-demo.sh

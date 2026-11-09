@@ -10,6 +10,8 @@ pub const Options = struct {
     name: []const u8 = "mock",
     progress: bool = true,
     guess: bool = false,
+    test_mode: bool = false,
+    test_output: ?[]const u8 = null,
     mock: bool = false,
     help: bool = false,
     report: ?Report = null,
@@ -35,6 +37,8 @@ pub const usage =
     \\  --no-progress               Disable progress display
     \\  --progress-stream auto|stdout|stderr
     \\                              Progress terminal (default: auto, prefer stderr)
+    \\  --test                      Log raw progress snapshots and protocol errors
+    \\  --test-output FILE          Save test log to FILE (default: stderr)
     \\  --guess                     Estimate file I/O progress (Linux)
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\  --                        End options before a command starting with '-'
@@ -70,6 +74,12 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             i += 1;
             if (i == args.len) return error.MissingProgressStream;
             o.progress_stream = std.meta.stringToEnum(ProgressStream, args[i]) orelse return error.InvalidProgressStream;
+        } else if (std.mem.eql(u8, a, "--test")) {
+            o.test_mode = true;
+        } else if (std.mem.eql(u8, a, "--test-output")) {
+            i += 1;
+            if (i == args.len or args[i].len == 0) return error.MissingTestOutput;
+            o.test_output = args[i];
         } else if (std.mem.eql(u8, a, "--guess")) {
             o.guess = true;
         } else if (std.mem.eql(u8, a, "--report")) {
@@ -103,6 +113,8 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             break;
         }
     }
+    if (o.test_output != null and !o.test_mode) return error.TestOutputRequiresTest;
+    if (o.test_mode and (o.mock or o.report != null or o.guess or !o.progress)) return error.IncompatibleTestOptions;
     if (o.mock and o.argv.len != 0) return error.MockWithCommand;
     if (o.report != null and (o.mock or o.argv.len != 0)) return error.ReportWithCommand;
     if (o.guess and (o.mock or o.report != null)) return error.GuessRequiresCommand;
@@ -219,4 +231,14 @@ test "leading flags and unchanged child arguments" {
     const dashed = try parse(&.{ "--", "-command", "--help" }, null);
     try std.testing.expectEqualSlices([]const u8, &.{ "-command", "--help" }, dashed.argv);
     try std.testing.expectError(error.MissingCommand, parse(&.{"--"}, null));
+}
+
+test "test logging options preserve command arguments" {
+    const o = try parse(&.{ "--test", "--test-output", "progress.log", "tool", "--test", "--test-output" }, null);
+    try std.testing.expect(o.test_mode);
+    try std.testing.expectEqualStrings("progress.log", o.test_output.?);
+    try std.testing.expectEqualSlices([]const u8, &.{ "tool", "--test", "--test-output" }, o.argv);
+    try std.testing.expectError(error.MissingCommand, parse(&.{"--test"}, null));
+    try std.testing.expectError(error.TestOutputRequiresTest, parse(&.{ "--test-output", "log", "tool" }, null));
+    try std.testing.expectError(error.MissingTestOutput, parse(&.{ "--test", "--test-output" }, null));
 }
