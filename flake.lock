@@ -59,11 +59,11 @@
         "pre-commit-hooks": "pre-commit-hooks"
       },
       "locked": {
-        "lastModified": 1793769107,
-        "narHash": "sha256-0nY6xqzXwN6cSI4lX46kPyYLUhQSEK/+T0HzkPS9DNg=",
+        "lastModified": 1794245707,
+        "narHash": "sha256-Fq99+v15ERc5tqldQ5bg67Mblo6P79qQEfsaHBN4kuU=",
         "owner": "asciimoth",
         "repo": "ghrepo",
-        "rev": "4305d93d59163ad4733a2b5a9c6275d1729653f4",
+        "rev": "2fb2235e88fb008ff689b2cf615911d9b70c0bea",
         "type": "github"
       },
       "original": {
