@@ -4,7 +4,6 @@ const output = @import("output.zig");
 const signals = @import("signals.zig");
 const reader = @import("stream_reader.zig");
 const cli = @import("cli.zig");
-const progress_display = @import("progress.zig");
 const child_process = @import("child_process.zig");
 
 // A fixed seed makes the demo repeatable. The tree shape and task times still vary.
@@ -218,12 +217,12 @@ fn readInput(io: std.Io, buffer: *[4096]u8) !usize {
 }
 
 fn runInput(io: std.Io, allocator: std.mem.Allocator, o: cli.Options, first: []const u8) !u8 {
-    var display: progress_display.Progress = .{};
-    const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
+    const root = if (o.progress) std.Progress.start(io, .{
         .root_name = o.name,
         .refresh_rate_ns = output.progress_refresh_rate,
-    });
-    defer display.end(io);
+        .disable_printing = true,
+    }) else std.Progress.Node.none;
+    defer root.end();
     const lines = root.start("input lines", 0);
     defer lines.end();
     var pending: std.ArrayList(u8) = .empty;
@@ -347,6 +346,7 @@ pub fn runWorker(io: std.Io, kind: []const u8, progress_enabled: bool) !u8 {
         .root_name = kind,
         .estimated_total_items = 3,
         .refresh_rate_ns = output.progress_refresh_rate,
+        .disable_printing = true,
     }) else std.Progress.Node.none;
     defer root.end();
     var prng = std.Random.DefaultPrng.init(seed ^ @as(u64, kind[0]));
@@ -373,13 +373,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     }
     const colors = try Colors.detect(io);
     const exe = try std.process.executablePathAlloc(io, allocator);
-    var display: progress_display.Progress = .{};
-    const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
+    const root = if (o.progress) std.Progress.start(io, .{
         .root_name = "mock",
         .estimated_total_items = 7,
         .refresh_rate_ns = output.progress_refresh_rate,
-    });
-    defer display.end(io);
+        .disable_printing = true,
+    }) else std.Progress.Node.none;
+    defer root.end();
 
     const indexer_node = root.start("indexer", 0);
     defer indexer_node.end();

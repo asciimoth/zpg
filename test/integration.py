@@ -476,7 +476,7 @@ try:
             if b'input lines' in data:
                 input_writer.close()
 
-        capture = terminal_capture(['--mock'], stdin=input_read,
+        capture = terminal_capture([exe, '--mock'], stdin=input_read,
                                    stdout_pattern=b'alpha\nbeta\ngamma\n',
                                    on_output=finish_mock_input)
         assert b'input lines' in capture, capture
@@ -688,7 +688,7 @@ assert b'[#########---] 75% 3/4' in capture
 capture = terminal_capture([*custom_args, exe, '--bar-style', 'ascii', render_probe])
 assert ('█' * 9 + '    75% 3/4').encode() in capture
 assert b'[#########---]' not in capture
-capture = terminal_capture([*custom_args, '--mock'], stop_when='█'.encode(), code=130,
+capture = terminal_capture([*custom_args, exe, '--mock'], stop_when='█'.encode(), code=130,
                            stdout_pattern=rb'(mock stdout: work in progress\n|mock worker: processing item\n)+')
 assert '█'.encode() in capture
 capture = terminal_capture(['--renderer', 'tree', render_probe])
@@ -800,6 +800,8 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
 for prefix in ([], [exe]):
     captures = capture_destinations([*prefix, '--mock'], True, True,
                                     timeout=MOCK_TIMEOUT, convert=True)
+    if not prefix:
+        assert all(b'\x1b[?2026h' not in data for data in captures.values()), captures
     for name, expected_lines in [
             ('stdout', ['mock carriage return: [####] 100%', 'mock stdout: complete']),
             ('stderr', ['mock footer: complete', 'mock footer items: 2/2',

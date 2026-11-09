@@ -78,16 +78,17 @@ Run `zpg` before the command whose progress you want to see:
 ```sh
 zpg --name build ./worker --flag value
 zpg --guess cp large.iso /backup/
-zpg --mock
+zpg zpg --mock
 ```
 
-`--mock` runs a fixed progress demo when stdin is empty. With input from a pipe
-or file, it echoes each line after a short delay and shows input progress. The
+`--mock` runs a fixed progress workload when stdin is empty. It sends progress
+data to a parent `zpg` process and does not draw a progress display itself.
+With input from a pipe or file, it echoes each line after a short delay. The
 demo preserves a final line without a newline:
 
 ```sh
-printf 'one\ntwo\n' | zpg --mock
-zpg --mock < input.txt
+printf 'one\ntwo\n' | zpg zpg --mock
+zpg zpg --mock < input.txt
 ```
 
 In the fixed demo, stdout logs are green when stdout is a terminal. Stderr logs
