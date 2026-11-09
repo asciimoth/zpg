@@ -31,7 +31,10 @@
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks = {
-              check-added-large-files.enable = true;
+              check-added-large-files = {
+                enable = true;
+                excludes = [ "^demo\\.gif$" ];
+              };
               check-case-conflicts.enable = true;
               check-merge-conflicts.enable = true;
               commitizen.enable = true;
@@ -74,6 +77,12 @@
                 zig_0_17
                 just
                 nixfmt
+
+                (vhs.override {
+                  chromium = chromium.override {
+                    commandLineArgs = "--password-store=basic";
+                  };
+                })
               ]
               ++ hook.enabledPackages;
             inherit (hook) shellHook;

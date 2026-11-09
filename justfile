@@ -7,6 +7,10 @@ demo:
     zig build
     PATH="./zig-out/bin:$PATH" zpg zpg --mock
 
+vhs:
+    zig build
+    PATH="./zig-out/bin:$PATH" vhs demo.tape
+
 demo-test:
     zig build
     PATH="./zig-out/bin:$PATH" zpg --test zpg --mock

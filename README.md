@@ -2,6 +2,8 @@
 
 `zpg` runs a command with a progress overlay.
 
+![Demo of zpg showing command output and progress](demo.gif)
+
 ## Usage
 
 `zpg` supports Linux and macOS. Use Zig 0.17.0 to build it. Add `zig-out/bin`
