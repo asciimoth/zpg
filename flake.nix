@@ -1,3 +1,11 @@
+# Usage:
+# - Build the package: nix build .#zpg
+# - Run from the flake: nix run github:asciimoth/zpg#zpg -- true
+# - Add to a temporary shell: nix shell github:asciimoth/zpg#zpg
+# - Install in a profile: nix profile add github:asciimoth/zpg#zpg
+# - Install in a NixOS configuration after adding the flake input:
+#     zpg.url = "github:asciimoth/zpg";
+#     environment.systemPackages = [ inputs.zpg.packages.${pkgs.system}.zpg ];
 {
   description = "Zig progress";
 
@@ -25,6 +33,54 @@
       eachSystem = nixpkgs.lib.genAttrs systems;
     in
     {
+      packages = eachSystem (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          package = pkgs.stdenvNoCC.mkDerivation {
+            pname = "zpg";
+            version = "unstable";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./build.zig
+                ./src
+                ./LICENSE
+                ./LICENSE-UNICODE
+              ];
+            };
+            nativeBuildInputs = [ pkgs.zig_0_17 ];
+            dontConfigure = true;
+
+            buildPhase = ''
+              runHook preBuild
+              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+              zig build -Doptimize=ReleaseSafe --cache-dir "$TMPDIR/zig-cache"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 zig-out/bin/zpg "$out/bin/zpg"
+              install -Dm644 LICENSE "$out/share/licenses/zpg/LICENSE"
+              install -Dm644 LICENSE-UNICODE "$out/share/licenses/zpg/LICENSE-UNICODE"
+              runHook postInstall
+            '';
+
+            meta = {
+              description = "Run commands with a progress overlay";
+              homepage = "https://github.com/asciimoth/zpg";
+              license = pkgs.lib.licenses.gpl3Only;
+              mainProgram = "zpg";
+            };
+          };
+        in
+        {
+          zpg = package;
+          default = package;
+        }
+      );
+
       checks = eachSystem (
         system:
         let
