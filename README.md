@@ -29,7 +29,9 @@ zpg --mock
 
 `--mock` runs a fixed progress demo when stdin is empty. With piped or
 redirected input, it echoes each line with a short delay and shows input
-progress. It also prints a final line that has no newline:
+progress. In the fixed demo, stdout logs are green when stdout is a terminal,
+and stderr logs are red when stderr is a terminal. It also prints a final line
+that has no newline:
 
 ```sh
 printf 'one\ntwo\n' | zpg --mock
@@ -110,16 +112,25 @@ stderr. When only stdout is a terminal, progress appears there instead.
 To save both streams without progress, use `zpg worker > combined.log 2>&1`.
 To combine them in a pipeline, use `zpg worker 2>&1 | consumer`.
 
+Each command output stream gets a separate pseudo-terminal when the matching
+`zpg` stream is a terminal. Otherwise, it gets a pipe. Programs can use their
+normal TTY checks to enable colored logs. This also works with `--no-progress`
+and nested `zpg` commands. `--no-progress` also hides progress in nested `zpg`
+commands.
+Other programs can still emit their own progress or terminal controls.
+The pseudo-terminals use the initial size of their matching terminals, with
+output conversion disabled. `zpg` forwards the bytes without interpreting
+terminal escape sequences.
+
 When stdin is a terminal, the command receives an empty stdin instead.
-The command's stdout and stderr are pipes. `zpg` does not support interactive
-commands or full-screen applications.
+`zpg` does not support interactive commands or full-screen applications.
 
 `zpg` returns the command's exit code. If a signal kills the command, `zpg`
 returns `128 + signal`. Invalid arguments return 2. Launch or I/O errors
 return 1.
 On Ctrl-C or SIGTERM, `zpg` asks the command's process group to stop.
 If necessary, `zpg` forces the process group to stop after two seconds.
-If a descendant keeps an output pipe open after the command exits, `zpg`
+If a descendant keeps an output stream open after the command exits, `zpg`
 stops reading after two seconds and warns that output was discarded.
 
 ## Reporting progress from workers

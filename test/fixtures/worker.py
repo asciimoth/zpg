@@ -11,6 +11,15 @@ if mode == 'args':
     print('tty=' + repr((os.isatty(1), os.isatty(2))))
 elif mode == 'bytes':
     os.write(int(sys.argv[2]), b'first\n\nlast\r\x1b[31m\x00' + bytes(range(256)) + b'x' * 20000)
+elif mode == 'tty':
+    for fd in (1, 2):
+        terminal = os.isatty(fd)
+        label = f'fd={fd} tty={terminal}'.encode()
+        if terminal:
+            size = os.get_terminal_size(fd)
+            label += f' size={size.columns}x{size.lines}'.encode()
+            label = b'\x1b[32m' + label + b'\x1b[0m'
+        os.write(fd, label + b'\n')
 elif mode == 'stdin':
     while chunk := sys.stdin.buffer.read(4096):
         sys.stdout.buffer.write(chunk)

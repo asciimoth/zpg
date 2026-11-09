@@ -9,6 +9,30 @@ const child_process = @import("child_process.zig");
 // A fixed seed makes the demo repeatable. The tree shape and task times still vary.
 const seed = 0x7a70672d6d6f636b;
 
+const Colors = struct {
+    stdout: bool,
+    stderr: bool,
+
+    fn detect(io: std.Io) !Colors {
+        return .{
+            .stdout = try std.Io.File.stdout().isTty(io),
+            .stderr = try std.Io.File.stderr().isTty(io),
+        };
+    }
+
+    fn writeStdout(self: Colors, io: std.Io, comptime line: []const u8) !void {
+        try output.writeStdout(io, if (self.stdout) "\x1b[32m" ++ line[0 .. line.len - 1] ++ "\x1b[0m\n" else line);
+    }
+
+    fn printStderr(self: Colors, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+        if (self.stderr) {
+            try output.print(io, "\x1b[31m" ++ fmt[0 .. fmt.len - 1] ++ "\x1b[0m\n", args);
+        } else {
+            try output.print(io, fmt, args);
+        }
+    }
+};
+
 fn pause(io: std.Io, random: std.Random, base_ms: u32) !void {
     if (signals.get() != 0) return error.Interrupted;
     const jitter = random.uintLessThan(u32, 170);
@@ -16,24 +40,24 @@ fn pause(io: std.Io, random: std.Random, base_ms: u32) !void {
     if (signals.get() != 0) return error.Interrupted;
 }
 
-fn note(io: std.Io, random: std.Random, phase: []const u8, detail: []const u8) !void {
-    try output.writeStdout(io, "mock stdout: work in progress\n");
+fn note(io: std.Io, colors: Colors, random: std.Random, phase: []const u8, detail: []const u8) !void {
+    try colors.writeStdout(io, "mock stdout: work in progress\n");
     if (random.uintLessThan(u8, 3) != 0)
-        try output.print(io, "mock stderr: {s}: {s}\n", .{ phase, detail });
+        try colors.printStderr(io, "mock stderr: {s}: {s}\n", .{ phase, detail });
 }
 
-fn work(io: std.Io, random: std.Random, parent: std.Progress.Node, name: []const u8, phase: []const u8, base_ms: u32) !void {
+fn work(io: std.Io, colors: Colors, random: std.Random, parent: std.Progress.Node, name: []const u8, phase: []const u8, base_ms: u32) !void {
     const task = parent.start(name, 1);
     defer task.end();
-    try note(io, random, phase, name);
+    try note(io, colors, random, phase, name);
     try pause(io, random, base_ms);
 }
 
-fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
+fn demonstrate(io: std.Io, colors: Colors, random: std.Random, root: std.Progress.Node) !void {
     {
         const discover = root.start("discover", 2);
         defer discover.end();
-        try work(io, random, discover, "read config", "discover", 100);
+        try work(io, colors, random, discover, "read config", "discover", 100);
         const scan = discover.start("scan inputs", 0);
         defer scan.end();
         const inputs = 2 + random.uintLessThan(usize, 3);
@@ -41,9 +65,9 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
         for (0..inputs) |i| {
             const item = scan.startFmt(1, "input {d}", .{i + 1});
             defer item.end();
-            try note(io, random, "discover", "scan input");
+            try note(io, colors, random, "discover", "scan input");
             try pause(io, random, 55);
-            if (i == 1) try work(io, random, item, "inspect metadata", "discover", 75);
+            if (i == 1) try work(io, colors, random, item, "inspect metadata", "discover", 75);
         }
     }
     {
@@ -65,13 +89,13 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
         for (0..asset_count) |i| {
             const asset = assets.startFmt(1, "asset {d}", .{i + 1});
             defer asset.end();
-            try note(io, random, "build", "asset");
+            try note(io, colors, random, "build", "asset");
             try pause(io, random, 80);
             if (i == 0) {
                 const transform = asset.start("transform", 2);
                 defer transform.end();
-                try work(io, random, transform, "decode", "build", 90);
-                try work(io, random, transform, "compress", "build", 130);
+                try work(io, colors, random, transform, "decode", "build", 90);
+                try work(io, colors, random, transform, "compress", "build", 130);
             }
         }
         assets.end();
@@ -82,15 +106,15 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
         for (0..module_count) |i| {
             const module = code.startFmt(1, "module {d}", .{i + 1});
             defer module.end();
-            try note(io, random, "build", "module");
+            try note(io, colors, random, "build", "module");
             try pause(io, random, 95);
             if (i == module_count - 1) {
                 const generate = module.start("generate", 2);
                 defer generate.end();
-                try work(io, random, generate, "emit source", "build", 100);
+                try work(io, colors, random, generate, "emit source", "build", 100);
                 const link = generate.start("link", 1);
                 defer link.end();
-                try work(io, random, link, "resolve symbols", "build", 220);
+                try work(io, colors, random, link, "resolve symbols", "build", 220);
             }
         }
         code.end();
@@ -101,10 +125,10 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
         for (0..checks) |i| {
             const check = verify.startFmt(1, "check {d}", .{i + 1});
             defer check.end();
-            try note(io, random, "build", "verify");
+            try note(io, colors, random, "build", "verify");
             try pause(io, random, 180);
             if (i == 0 and random.boolean())
-                try work(io, random, check, "repair index", "build", 130);
+                try work(io, colors, random, check, "repair index", "build", 130);
         }
         verify.end();
         verify_done = true;
@@ -116,13 +140,13 @@ fn demonstrate(io: std.Io, random: std.Random, root: std.Progress.Node) !void {
         var upload_done = false;
         defer if (!upload_done) upload.end();
         for (0..3) |_| {
-            try note(io, random, "publish", "upload chunk");
+            try note(io, colors, random, "publish", "upload chunk");
             try pause(io, random, 65);
             upload.completeOne();
         }
         upload.end();
         upload_done = true;
-        try work(io, random, publish, "write manifest", "publish", 95);
+        try work(io, colors, random, publish, "write manifest", "publish", 95);
     }
 }
 
@@ -266,8 +290,8 @@ fn runWorkerProcess(
     return result;
 }
 
-fn demonstrateWorker(io: std.Io, kind: []const u8, root: std.Progress.Node, random: std.Random) !void {
-    try output.print(io, "mock worker {s} (pid {d}): started\n", .{ kind, std.posix.system.getpid() });
+fn demonstrateWorker(io: std.Io, colors: Colors, kind: []const u8, root: std.Progress.Node, random: std.Random) !void {
+    try colors.printStderr(io, "mock worker {s} (pid {d}): started\n", .{ kind, std.posix.system.getpid() });
     for (0..3) |batch_index| {
         const batch = root.startFmt(0, "{s} batch {d}", .{ kind, batch_index + 1 });
         defer batch.end();
@@ -276,34 +300,34 @@ fn demonstrateWorker(io: std.Io, kind: []const u8, root: std.Progress.Node, rand
         for (0..items) |item_index| {
             const item = batch.startFmt(1, "item {d}", .{item_index + 1});
             defer item.end();
-            try output.writeStdout(io, "mock worker: processing item\n");
+            try colors.writeStdout(io, "mock worker: processing item\n");
             try pause(io, random, 120 + @as(u32, @intCast(batch_index)) * 35);
             if (batch_index == 1 and item_index == 0) {
                 const inspect = item.start("inspect", 2);
                 defer inspect.end();
-                try work(io, random, inspect, "decode", kind, 130);
-                try work(io, random, inspect, "normalize", kind, 160);
+                try work(io, colors, random, inspect, "decode", kind, 130);
+                try work(io, colors, random, inspect, "normalize", kind, 160);
             }
         }
     }
-    try output.print(io, "mock worker {s}: complete\n", .{kind});
+    try colors.printStderr(io, "mock worker {s}: complete\n", .{kind});
 }
 
-pub fn runWorker(io: std.Io, kind: []const u8) !u8 {
+pub fn runWorker(io: std.Io, kind: []const u8, progress_enabled: bool) !u8 {
     if (!std.mem.eql(u8, kind, "indexer") and
         !std.mem.eql(u8, kind, "compiler") and
         !std.mem.eql(u8, kind, "uploader")) return error.InvalidMockWorker;
 
     const guard = signals.Guard.install();
     defer guard.restore();
-    const root = std.Progress.start(io, .{
+    const root = if (progress_enabled) std.Progress.start(io, .{
         .root_name = kind,
         .estimated_total_items = 3,
         .refresh_rate_ns = output.progress_refresh_rate,
-    });
+    }) else std.Progress.Node.none;
     defer root.end();
     var prng = std.Random.DefaultPrng.init(seed ^ @as(u64, kind[0]));
-    demonstrateWorker(io, kind, root, prng.random()) catch |err| switch (err) {
+    demonstrateWorker(io, try Colors.detect(io), kind, root, prng.random()) catch |err| switch (err) {
         error.Interrupted => return @intCast(128 + signals.get()),
         else => return err,
     };
@@ -324,6 +348,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
             if (count != 0) return runInput(io, allocator, o, first[0..count]);
         }
     }
+    const colors = try Colors.detect(io);
     const exe = try std.process.executablePathAlloc(io, allocator);
     var display: progress_display.Progress = .{};
     const root = try display.start(io, o.progress, o.progress_stream, o.renderer, o.style, .{
@@ -355,7 +380,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
     var first_error: ?anyerror = null;
-    demonstrate(io, random, root) catch |err| switch (err) {
+    demonstrate(io, colors, random, root) catch |err| switch (err) {
         error.Interrupted => {},
         else => first_error = err,
     };
@@ -381,7 +406,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
         const code = statusCode(term);
         if (code != 0) return code;
     }
-    try output.writeStdout(io, "mock stdout: complete\n");
-    try output.print(io, "mock stderr: complete\n", .{});
+    try colors.writeStdout(io, "mock stdout: complete\n");
+    try colors.printStderr(io, "mock stderr: complete\n", .{});
     return 0;
 }

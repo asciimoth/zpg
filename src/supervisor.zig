@@ -39,7 +39,7 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         const stderr = child.stderr.?;
         child.stderr = null;
         defer stderr.close(io);
-        // Readers borrow the pipe handles; wait must not close them.
+        // Readers borrow the capture handles; wait must not close them.
         var storage: [32]output.Chunk = undefined;
         var queue = output.Queue.init(&storage);
         var failed = std.atomic.Value(bool).init(false);

@@ -10,12 +10,14 @@ pub fn main(init: std.process.Init) void {
 }
 fn run(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const progress_enabled = !std.mem.eql(u8, init.environ_map.get("ZPG_NO_PROGRESS") orelse "", "1");
     if (args.len == 3 and std.mem.eql(u8, args[1], "--mock-worker"))
-        return @import("mock.zig").runWorker(init.io, args[2]);
-    const o = cli.parse(args[1..], init.environ_map.get("UNICODE_PROGRESS_BAR")) catch |err| {
+        return @import("mock.zig").runWorker(init.io, args[2], progress_enabled);
+    var o = cli.parse(args[1..], init.environ_map.get("UNICODE_PROGRESS_BAR")) catch |err| {
         try output.print(init.io, "zpg: {s}\n{s}", .{ @errorName(err), cli.usage });
         return 2;
     };
+    o.progress = o.progress and progress_enabled;
     if (o.help) {
         try output.print(init.io, "{s}", .{cli.usage});
         return 0;

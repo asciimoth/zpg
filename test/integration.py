@@ -20,6 +20,7 @@ fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'worker.py')
 report_demo = str(pathlib.Path(__file__).parent.parent / 'examples' / 'report-demo.sh')
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 env.pop('UNICODE_PROGRESS_BAR', None)
+env.pop('ZPG_NO_PROGRESS', None)
 
 def capture_output(*args, code=0):
     p = subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -271,7 +272,7 @@ for pid in worker_pids:
         pass
     else:
         raise AssertionError(f'mock worker {pid} was not reaped')
-# A PTY gives the renderer a real terminal, while child output remains piped.
+# A PTY gives the renderer and the child's stderr a terminal.
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 48, 100, 0, 0))
 terminal_env = dict(env, TERM='xterm-256color')
@@ -329,7 +330,9 @@ while True:
         break
     log.extend(data)
 os.close(master)
-assert p.wait(timeout=2) == 0 and b'\x1b' not in log
+assert p.wait(timeout=2) == 0, log
+assert b'\x1b[?2026h' not in log and b'\x1b[J' not in log, log
+assert b'\x1b[32mmock stdout:' in log and b'\x1b[31mmock stderr:' in log, log
 print('integration checks passed (including terminal progress)')
 
 
@@ -481,6 +484,13 @@ assert capture == b'progress pipe: absent\r\n', capture
 # Exercise spawn failure and exit status while a progress pipe is active.
 terminal_capture(['zpg-command-that-does-not-exist'], code=1)
 terminal_capture([sys.executable, fixture, 'exit'], code=37)
+terminal_capture([sys.executable, fixture, 'signal'], code=143)
+# A descendant can also hold PTY slaves open. The capture timeout must still
+# stop zpg, without waiting for those descendants to close their descriptors.
+start = time.monotonic()
+capture = terminal_capture(['--no-progress', sys.executable, fixture, 'descendant'])
+assert b'parent done\r\n' in capture and b'pipe drain timeout' in capture, capture
+assert time.monotonic() - start < 3.5
 # The demo can exit before its final report is drawn. Check completion and
 # drawing here; the report fixture below keeps exact counts visible before exit.
 demo_capture = terminal_capture(['--name', 'shell demo', 'sh', report_demo])
@@ -650,11 +660,15 @@ assert b'\x1b' in capture and b'render probe' in capture
 assert b'[#########---]' not in capture
 capture = terminal_capture([render_probe], extra_env={'NO_COLOR': '1'})
 assert b'[#########---] 75% 3/4' in capture
-for args, overrides in [(['--no-progress', render_probe], {}),
-                        (['--no-progress', *custom_args, render_probe], {}),
-                        ([render_probe], {'TERM': 'dumb'})]:
-    capture = terminal_capture(args, extra_env=overrides)
-    assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), (args, overrides, capture)
+# An independent worker can now render its own output after detecting a TTY.
+# --no-progress disables zpg's display; it must not filter the worker's escapes.
+for args in [['--no-progress', render_probe],
+             ['--no-progress', *custom_args, render_probe]]:
+    capture = terminal_capture(args)
+    assert b'[3/4] render probe' in capture and b'render probe [' not in capture, capture
+    assert b'unsafe\x1b[2J label' in capture, capture
+capture = terminal_capture([render_probe], extra_env={'TERM': 'dumb'})
+assert b'\x1b' not in capture and capture == expected_logs.replace(b'\n', b'\r\n'), capture
 print('custom renderer checks passed (including resize and partial log lines)')
 
 
@@ -716,6 +730,70 @@ def capture_destinations(args, stdout_tty, stderr_tty, stdin=subprocess.DEVNULL,
         for file in files.values():
             file.close()
 
+
+# The fixed mock demo colors each stream only when that stream is a terminal.
+# Worker logs follow the same rule through the capture PTYs.
+for stdout_tty, stderr_tty in [(False, False), (False, True),
+                              (True, False), (True, True)]:
+    captures = capture_destinations(['--no-progress', '--mock'], stdout_tty, stderr_tty)
+    for name, terminal, color in [('stdout', stdout_tty, b'\x1b[32m'),
+                                  ('stderr', stderr_tty, b'\x1b[31m')]:
+        data = captures[name]
+        assert b'mock worker' in data and b'mock ' + name.encode() + b':' in data, data
+        if terminal:
+            assert all(line.startswith(color) and line.endswith(b'\x1b[0m\n')
+                       for line in data.splitlines(keepends=True)), (name, data)
+            assert b'\x1b[?2026h' not in data, data
+        else:
+            assert b'\x1b' not in data, (name, data)
+
+# Input echo must keep its bytes even when both destinations are terminals.
+read_fd, write_fd = os.pipe()
+try:
+    os.write(write_fd, b'raw input\n')
+finally:
+    os.close(write_fd)
+try:
+    captures = capture_destinations(['--no-progress', '--mock'], True, True, stdin=read_fd)
+finally:
+    os.close(read_fd)
+assert captures == dict(stdout=b'raw input\n', stderr=b''), captures
+print('mock output color and input echo checks passed')
+
+# TTY status follows each destination separately, including nested commands.
+# Progress settings and TERM must not change the stream's TTY status.
+for stdout_tty, stderr_tty in [(False, False), (False, True),
+                              (True, False), (True, True)]:
+    for prefix, overrides in [(['--no-progress'], {}),
+                              (['--no-progress', exe], {}),
+                              (['--no-progress'], {'TERM': 'dumb'}),
+                              (['--progress-stream', 'stdout'], {}),
+                              (['--progress-stream', 'stderr'], {})]:
+        captures = capture_destinations([*prefix, sys.executable, fixture, 'tty'],
+                                        stdout_tty, stderr_tty, extra_env=overrides)
+        for fd, name, terminal in [(1, 'stdout', stdout_tty), (2, 'stderr', stderr_tty)]:
+            expected_tty = f'fd={fd} tty={terminal}'.encode()
+            if terminal:
+                expected_tty = b'\x1b[32m' + expected_tty + b' size=80x12\x1b[0m'
+            assert expected_tty + b'\n' in captures[name], captures
+
+    # Include all byte values, ANSI escapes, CR, LF, and data larger than a PTY
+    # buffer. Neither the capture PTY nor the outer test terminal may alter it.
+    for fd, name in [('1', 'stdout'), ('2', 'stderr')]:
+        captures = capture_destinations(['--no-progress', sys.executable, fixture,
+                                         'bytes', fd], stdout_tty, stderr_tty)
+        assert captures[name] == payload, (stdout_tty, stderr_tty, name, captures)
+        assert captures['stderr' if name == 'stdout' else 'stdout'] == b'', captures
+    captures = capture_destinations(['--no-progress', sys.executable, fixture, 'volume'],
+                                    stdout_tty, stderr_tty)
+    assert captures == dict(stdout=expected + b'x' * 20000, stderr=expected.upper()), captures
+    # Empty PTYs must close without an I/O error or a drain timeout.
+    assert capture_destinations(['--no-progress', 'true'], stdout_tty, stderr_tty) == dict(stdout=b'', stderr=b'')
+print('worker TTY status, color, and byte preservation checks passed')
+
+captures = capture_destinations(['--no-progress', exe, sys.executable, fixture, 'volume'],
+                                True, True)
+assert captures == dict(stdout=expected + b'x' * 20000, stderr=expected.upper()), captures
 
 stream_script = ('printf "stdout marker\\n"; printf "stderr marker\\n" >&2; '
                  'zpg --report 1 2 --name stream-progress; sleep .3; '

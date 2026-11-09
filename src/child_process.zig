@@ -1,19 +1,38 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const capture = @import("output_capture.zig");
 
 pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8, node: std.Progress.Node) !std.process.Child {
     // A child in a separate process group cannot read the foreground terminal.
     // Files and pipes can be inherited directly, without an input copy task.
     const terminal_stdin = try std.Io.File.stdin().isTty(io);
+    const stdout = try capture.open(io, .stdout());
+    defer stdout[1].close(io);
+    errdefer stdout[0].close(io);
+    const stderr = try capture.open(io, .stderr());
+    defer stderr[1].close(io);
+    errdefer stderr[0].close(io);
     if (builtin.os.tag != .macos or node.index == .none) {
-        return std.process.spawn(io, .{
+        // PTYs let nested zpg commands detect a terminal again. Keep a disabled
+        // outer display disabled in those commands, without disabling color.
+        var child_env: ?std.process.Environ.Map = null;
+        defer if (child_env) |*map| map.deinit();
+        if (node.index == .none) {
+            child_env = try environ.createMap(std.heap.page_allocator);
+            try child_env.?.put("ZPG_NO_PROGRESS", "1");
+        }
+        var child = try std.process.spawn(io, .{
             .argv = argv,
+            .environ_map = if (child_env) |*map| map else null,
             .stdin = if (terminal_stdin) .ignore else .inherit,
-            .stdout = .pipe,
-            .stderr = .pipe,
+            .stdout = .{ .file = stdout[1] },
+            .stderr = .{ .file = stderr[1] },
             .progress_node = node,
             .pgid = 0,
         });
+        child.stdout = stdout[0];
+        child.stderr = stderr[0];
+        return child;
     }
 
     // Zig 0.17.0's processSpawnDarwin creates a progress pipe but builds the
@@ -25,10 +44,6 @@ pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8,
     const argv_z = try allocator.allocSentinel(?[*:0]const u8, argv.len, null);
     for (argv, 0..) |arg, i| argv_z[i] = (try allocator.dupeSentinel(u8, arg, 0)).ptr;
 
-    const stdout = try pipe(false);
-    errdefer for (stdout) |file| file.close(io);
-    const stderr = try pipe(false);
-    errdefer for (stderr) |file| file.close(io);
     const progress = try pipe(true);
     errdefer for (progress) |file| file.close(io);
     const env = try environ.createPosixBlock(allocator, .{ .zig_progress_fd = progress[1].handle });
@@ -52,8 +67,6 @@ pub fn spawn(io: std.Io, environ: std.process.Environ, argv: []const []const u8,
 
     var pid: std.posix.pid_t = undefined;
     try check(std.c.posix_spawnp(&pid, argv_z[0].?, &actions, &attributes, argv_z.ptr, env.slice.ptr));
-    stdout[1].close(io);
-    stderr[1].close(io);
     progress[1].close(io);
     node.setIpcFile(io.userdata, progress[0]);
     return .{
