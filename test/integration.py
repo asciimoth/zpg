@@ -902,9 +902,14 @@ with tempfile.TemporaryDirectory() as directory:
         p = subprocess.run([exe, '--test', 'lookup'], env=dict(env, PATH=search),
                            capture_output=True, timeout=5)
         assert p.returncode == 1 and error in p.stderr, p
-    command.write_text('executable without a valid image or interpreter\n')
-    p = capture_output('--test', str(command), code=1)
-    assert b'InvalidExe' in p.stderr, p.stderr
+    # Text without a shebang must fail to launch, including through PATH.
+    # A shell fallback would run this valid shell command and exit with 42.
+    command.write_text('exit 42\n')
+    for name in [str(command), 'lookup']:
+        p = subprocess.run([exe, '--test', name], env=dict(env, PATH=str(allowed)),
+                           capture_output=True, timeout=5)
+        assert p.returncode == 1 and b'InvalidExe' in p.stderr, p
+        assert b'process result=' not in p.stderr, p.stderr
     p = capture_output('--test', str(command / 'child'), code=1)
     assert b'NotDir' in p.stderr, p.stderr
 p = capture_output('--test', 'zpg-command-that-does-not-exist', code=1)

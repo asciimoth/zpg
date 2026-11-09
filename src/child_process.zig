@@ -56,7 +56,7 @@ pub fn spawnWithProgressFile(io: std.Io, environ: std.process.Environ, argv: []c
     const pid = if (builtin.os.tag == .linux)
         try @import("spawn_linux.zig").spawn(allocator, argv_z.ptr, env.slice.ptr, environ.getPosix("PATH") orelse "/bin:/usr/bin", stdout[1].handle, stderr[1].handle, progress_write.handle, terminal_stdin)
     else
-        try spawn_darwin(argv_z.ptr, env.slice.ptr, stdout[1].handle, stderr[1].handle, progress_write.handle, terminal_stdin);
+        try spawn_darwin(allocator, argv_z.ptr, env.slice.ptr, environ.getPosix("PATH") orelse "/bin:/usr/bin", stdout[1].handle, stderr[1].handle, progress_write.handle, terminal_stdin);
     if (progress) |files| {
         files[1].close(io);
         node.setIpcFile(io.userdata, files[0]);
@@ -72,7 +72,7 @@ pub fn spawnWithProgressFile(io: std.Io, environ: std.process.Environ, argv: []c
 }
 
 // macOS uses libSystem as its supported system call interface.
-fn spawn_darwin(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, out: c_int, err: c_int, progress_fd: c_int, ignore_stdin: bool) !std.posix.pid_t {
+fn spawn_darwin(allocator: std.mem.Allocator, argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, path: []const u8, out: c_int, err: c_int, progress_fd: c_int, ignore_stdin: bool) !std.posix.pid_t {
     var actions: std.c.posix_spawn_file_actions_t = undefined;
     try check(std.c.posix_spawn_file_actions_init(&actions));
     defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
@@ -87,8 +87,33 @@ fn spawn_darwin(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]con
     try check(std.c.posix_spawnattr_setpgroup(&attributes, 0));
     try check(std.c.posix_spawnattr_setflags(&attributes, .{ .SETPGROUP = true }));
     var pid: std.posix.pid_t = undefined;
-    try check(std.c.posix_spawnp(&pid, argv[0].?, &actions, &attributes, argv, env));
-    return pid;
+    // Darwin's posix_spawnp runs /bin/sh on ENOEXEC. Search PATH ourselves
+    // so invalid executables report the same launch error as on Linux.
+    const name = std.mem.span(argv[0].?);
+    if (name.len == 0) return error.FileNotFound;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        try check(std.c.posix_spawn(&pid, argv[0].?, &actions, &attributes, argv, env));
+        return pid;
+    }
+    var denied = false;
+    var dirs = std.mem.splitScalar(u8, path, ':');
+    while (dirs.next()) |dir| {
+        const candidate = if (dir.len == 0)
+            try allocator.dupeSentinel(u8, name, 0)
+        else
+            try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir, name }, 0);
+        defer allocator.free(candidate);
+        check(std.c.posix_spawn(&pid, candidate, &actions, &attributes, argv, env)) catch |failure| switch (failure) {
+            error.AccessDenied => {
+                denied = true;
+                continue;
+            },
+            error.FileNotFound, error.NotDir => continue,
+            else => return failure,
+        };
+        return pid;
+    }
+    return if (denied) error.AccessDenied else error.FileNotFound;
 }
 
 fn pipe(nonblocking: bool) ![2]std.Io.File {
