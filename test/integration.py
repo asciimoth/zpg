@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from terminal_model import Terminal
+from terminal_model import Terminal, feed_output, output_without_overlay
 from fixture_sync import FixtureSync
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
@@ -498,7 +498,7 @@ if sys.platform.startswith('linux'):
             assert b'75% 768/1024' in capture, capture
             last_known = capture.rfind(b'75% 768/1024')
             assert b'I/O estimate (unknown)' in capture[last_known:], capture
-            logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+            logs = output_without_overlay(capture)
             assert logs == b'copy step\r\n' * 2, logs
         capture = terminal_capture(['--guess', '--renderer', 'tree', *args],
                                    checkpoints=[(1, rb'I/O estimate \(bytes\): input.bin'),
@@ -519,7 +519,7 @@ if sys.platform.startswith('linux'):
         # add diagnostics or debug stack traces to the command's log.
         capture = terminal_capture(['--guess', sys.executable, fixture,
                                     'file-churn', str(source)])
-        logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+        logs = output_without_overlay(capture)
         assert logs == b'churn complete\r\n', logs
         # File names must not inject terminal controls in either renderer.
         unusual = pathlib.Path(directory) / 'line\n\x1b[2Jé.bin'
@@ -604,8 +604,8 @@ spinner_frames = set(re.findall(rb'unknown ([|/\\-]) 2 done', capture))
 assert len(spinner_frames) > 1, spinner_frames
 assert b'unsafe?[2J label?' in capture
 assert b'\x1b[2J' not in capture and '\u202e'.encode() not in capture
-# Removing whole drawing transactions must leave the original log bytes.
-logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', capture, flags=re.S)
+# Removing only overlay operations must leave the original log bytes.
+logs = output_without_overlay(capture)
 assert logs == expected_logs.replace(b'\n', b'\r\n')
 assert progress_cleared(capture), 'the final progress tree was not cleared'
 
@@ -617,7 +617,7 @@ assert ('█' * 9 + '    75% 3/4').encode() in custom_capture
 assert ('█' * 12 + ' 100% 7/4').encode() in custom_capture
 assert 'unknown ⠋ 2 done'.encode() in custom_capture
 assert 'unknown ⠙ 2 done'.encode() in custom_capture
-custom_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', custom_capture, flags=re.S)
+custom_logs = output_without_overlay(custom_capture)
 assert custom_logs == expected_logs.replace(b'\n', b'\r\n')
 custom_capture.decode('utf-8')
 custom_capture = terminal_capture(['--bar-style', '(▓░)', '--spinner-style', 'ab', render_probe])
@@ -641,7 +641,7 @@ for args, overrides in [([render_probe], fira_env),
     assert fira_bar in fira_capture and fira_full in fira_capture
     fira_frames = set(re.findall('unknown ([\uee06-\uee0b]) 2 done', fira_capture.decode()))
     assert len(fira_frames) > 1, fira_frames
-    fira_logs = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', fira_capture, flags=re.S)
+    fira_logs = output_without_overlay(fira_capture)
     assert fira_logs == expected_logs.replace(b'\n', b'\r\n')
 fira_capture = terminal_capture(['--bar-style', 'ascii', render_probe], extra_env=fira_env)
 assert b'[#########---] 75% 3/4' in fira_capture
@@ -659,7 +659,7 @@ assert b'[#########---] 75% 3/4' in fira_capture
 # The same independent screen model is used by the focused terminal suite.
 def replay_terminal(data, rows, cols, snapshots=None):
     terminal = Terminal(rows, cols)
-    terminal.feed(data)
+    feed_output(terminal, data)
     if snapshots is not None:
         snapshots.extend(terminal.snapshots)
     return terminal.lines()
@@ -717,7 +717,7 @@ for renderer in ('bars', 'tree'):
             visible = [line for line in replay_terminal(control_capture, 8, 80) if line]
             assert visible == control_expected, visible
             # After removing zpg's drawing, all child control bytes must remain.
-            raw = re.sub(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', b'', control_capture, flags=re.S)
+            raw = output_without_overlay(control_capture)
             direct = run('--no-progress', sys.executable, fixture, 'controls', fd,
                          stream='stdout' if fd == '1' else 'stderr')
             assert raw == direct.replace(b'\n', b'\r\n'), (raw, direct)

@@ -5,7 +5,33 @@ checks cover cursor and screen effects before it is used for differential tests.
 It deliberately rejects unknown sequences instead of silently ignoring them.
 """
 import codecs
+import re
 import unicodedata
+
+
+# Match only zpg's cursor operations and printable frame. Log bytes can now
+# share a synchronized update with the clear and redraw operations.
+OVERLAY = re.compile(
+    rb'\x1b\[\?2026[hl]'
+    rb'|\x1b\[\d+B\r\x1b\[J\x1b\[\d+A\x1b\[\d+G'
+    rb'|(?:\x1bD)+\x1b\[\d+A\x1b\[\d+B\r[^\x1b]*\x1b\[\d+A\x1b\[\d+G'
+)
+
+
+def output_without_overlay(data):
+    return OVERLAY.sub(b'', data)
+
+
+def feed_output(terminal, data):
+    offset = 0
+    for operation in OVERLAY.finditer(data):
+        terminal.drawing = False
+        terminal.feed(data[offset:operation.start()])
+        terminal.drawing = True
+        terminal.feed(operation.group())
+        offset = operation.end()
+    terminal.drawing = False
+    terminal.feed(data[offset:])
 
 
 class Terminal:

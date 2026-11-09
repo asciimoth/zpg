@@ -1,8 +1,7 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const terminal = @import("terminal.zig");
-// Log writes clear the tree; the next progress snapshot restores it.
-// Keep that blank interval near one display frame instead of the default 80 ms.
+// Collect updates promptly. Unchanged frames do not write to the terminal.
 pub const progress_refresh_rate: std.Io.Duration = .fromMilliseconds(16);
 
 pub const Stream = enum {
@@ -23,6 +22,11 @@ var progress_stream: ?Stream = null;
 var progress_visible = false;
 var cursor: terminal.Cursor = .{};
 var tracked_streams: [2]bool = .{ false, false };
+var frame_buffer: [131072]u8 = undefined;
+var frame_len: usize = 0;
+var frame_lines: usize = 0;
+var frame_cols: usize = 0;
+var frame_rows: usize = 0;
 
 pub fn configure(io: std.Io, choice: cli.ProgressStream) !?std.Io.File {
     const stream: Stream = switch (choice) {
@@ -32,6 +36,9 @@ pub fn configure(io: std.Io, choice: cli.ProgressStream) !?std.Io.File {
     };
     stream.file().enableAnsiEscapeCodes(io) catch return null;
     progress_stream = stream;
+    progress_visible = false;
+    frame_len = 0;
+    frame_lines = 0;
     for ([_]Stream{ .stdout, .stderr }, 0..) |candidate, index| {
         tracked_streams[index] = try candidate.file().isTty(io) and
             terminal.same_terminal(candidate.file().handle, stream.file().handle);
@@ -72,6 +79,8 @@ fn clear_locked(io: std.Io) !void {
 pub fn clear(io: std.Io) !void {
     _ = try io.vtable.lockStderr(io.userdata, null);
     defer io.unlockStderr();
+    frame_len = 0;
+    frame_lines = 0;
     try clear_locked(io);
 }
 
@@ -80,6 +89,15 @@ pub fn draw(io: std.Io, frame: []const u8, lines: usize, cols: usize, rows: usiz
     const stream = progress_stream orelse return;
     _ = try io.vtable.lockStderr(io.userdata, null);
     defer io.unlockStderr();
+    const unchanged = frame_cols == cols and frame_rows == rows and frame_lines == lines and
+        std.mem.eql(u8, frame_buffer[0..frame_len], frame);
+    if (unchanged and progress_visible) return;
+    std.debug.assert(frame.len <= frame_buffer.len);
+    @memcpy(frame_buffer[0..frame.len], frame);
+    frame_len = frame.len;
+    frame_lines = lines;
+    frame_cols = cols;
+    frame_rows = rows;
     cursor.resize(cols, rows);
     if (!cursor.can_draw(lines)) {
         try clear_locked(io);
@@ -90,16 +108,22 @@ pub fn draw(io: std.Io, frame: []const u8, lines: usize, cols: usize, rows: usiz
     const writer = &file_writer.interface;
     try writer.writeAll("\x1b[?2026h");
     try clearProgress(&file_writer);
+    try draw_cached(writer);
+    try writer.writeAll("\x1b[?2026l");
+    try writer.flush();
+}
+
+fn draw_cached(writer: *std.Io.Writer) !void {
+    if (frame_lines == 0 or !cursor.can_draw(frame_lines)) return;
     // Reserve space below all child output, including a footer whose cursor
     // has returned to an earlier row. Do not use the child's saved cursor slot.
-    const distance = cursor.below() + lines;
+    const distance = cursor.below() + frame_lines;
     try writer.splatBytesAll("\x1bD", distance);
     cursor.reserved(distance);
     try writer.print("\x1b[{d}A\x1b[{d}B\r", .{ distance, cursor.below() + 1 });
-    try writer.writeAll(frame);
-    try writer.print("\x1b[{d}A\x1b[{d}G\x1b[?2026l", .{ distance, cursor.column + 1 });
+    try writer.writeAll(frame_buffer[0..frame_len]);
+    try writer.print("\x1b[{d}A\x1b[{d}G", .{ distance, cursor.column + 1 });
     progress_visible = true;
-    try writer.flush();
 }
 
 pub const Chunk = struct {
@@ -111,32 +135,77 @@ pub const Queue = std.Io.Queue(Chunk);
 pub fn print(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     _ = try io.vtable.lockStderr(io.userdata, null);
     defer io.unlockStderr();
-    try clear_locked(io);
     var formatted: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
     defer formatted.deinit();
     try formatted.writer.print(fmt, args);
-    const bytes = formatted.written();
-    try std.Io.File.stderr().writeStreamingAll(io, bytes);
-    track(.stderr, bytes);
+    try write_locked(io, &.{.{ .stream = .stderr, .bytes = formatted.written() }});
 }
 
 pub fn writeStdout(io: std.Io, bytes: []const u8) !void {
     _ = try io.vtable.lockStderr(io.userdata, null);
     defer io.unlockStderr();
-    try clear_locked(io);
-    try std.Io.File.stdout().writeStreamingAll(io, bytes);
-    track(.stdout, bytes);
+    try write_locked(io, &.{.{ .stream = .stdout, .bytes = bytes }});
 }
+
+const Write = struct { stream: Stream, bytes: []const u8 };
 
 fn writeBatch(io: std.Io, chunks: []const Chunk) !void {
     _ = try io.vtable.lockStderr(io.userdata, null);
     defer io.unlockStderr();
-    try clear_locked(io);
-    for (chunks) |chunk| {
-        const bytes = chunk.data[0..chunk.len];
-        try chunk.stream.file().writeStreamingAll(io, bytes);
-        track(chunk.stream, bytes);
+    var writes: [8]Write = undefined;
+    for (chunks, 0..) |*chunk, index| {
+        writes[index] = .{ .stream = chunk.stream, .bytes = chunk.data[0..chunk.len] };
     }
+    try write_locked(io, writes[0..chunks.len]);
+}
+
+fn write_locked(io: std.Io, writes: []const Write) !void {
+    var next_cursor = cursor;
+    var affects_terminal = false;
+    for (writes) |write| {
+        if (write.bytes.len != 0 and tracked_streams[@backingInt(write.stream)]) {
+            next_cursor.feed(write.bytes);
+            affects_terminal = true;
+        }
+    }
+    // Never put a synchronization terminator inside a child's partial control
+    // sequence, UTF-8 character, or pending line wrap.
+    const synchronized = affects_terminal and progress_visible and next_cursor.ready();
+    const file = if (progress_stream) |stream| stream.file() else std.Io.File.stderr();
+    var buffer: [8192]u8 = undefined;
+    var file_writer = std.Io.File.Writer.initStreaming(file, io, &buffer);
+    const writer = &file_writer.interface;
+    if (synchronized) {
+        try writer.writeAll("\x1b[?2026h");
+        try clearProgress(&file_writer);
+        try writer.flush();
+    } else if (affects_terminal) {
+        try clear_locked(io);
+    }
+    errdefer if (synchronized) {
+        file.writeStreamingAll(io, "\x1b[?2026l") catch {};
+    };
+    for (writes) |write| {
+        try write.stream.file().writeStreamingAll(io, write.bytes);
+        track(write.stream, write.bytes);
+    }
+    if (affects_terminal and frame_lines != 0 and cursor.can_draw(frame_lines)) {
+        // A resize invalidates the cached clipping and reserved terminal space.
+        // Wait for a fresh snapshot instead of drawing the old frame at a new size.
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        _ = try io.operate(.{ .device_io_control = .{
+            .file = file,
+            .code = std.posix.T.IOCGWINSZ,
+            .arg = &size,
+        } });
+        if (size.col == frame_cols and size.row == frame_rows) {
+            if (!synchronized) try writer.writeAll("\x1b[?2026h");
+            try draw_cached(writer);
+            if (!synchronized) try writer.writeAll("\x1b[?2026l");
+        }
+    }
+    if (synchronized) try writer.writeAll("\x1b[?2026l");
+    try writer.flush();
 }
 
 pub fn run(io: std.Io, q: *Queue, failed: *std.atomic.Value(bool)) void {

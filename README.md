@@ -131,6 +131,11 @@ position, even after a restore. Progress can stay hidden until `zpg` knows
 that it has enough space to draw without scrolling. Both renderers use this
 behavior. Child stdout and stderr bytes stay unchanged.
 
+Unchanged progress frames do not redraw. For complete log writes, `zpg`
+clears the tree, writes the log, and restores the tree in one synchronized
+terminal update. Terminals that support synchronized updates do not show
+a blank tree between these steps.
+
 The pseudo-terminals use the initial size of their matching terminals. Output
 conversion is disabled. `zpg` does not support absolute screen positioning,
 scroll regions, alternate screens, or other complex terminal operations.

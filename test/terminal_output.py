@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import pty
-import re
 import select
 import signal
 import socket
@@ -22,16 +21,11 @@ import termios
 import time
 import unittest
 
-from terminal_model import Terminal, check_model
+from terminal_model import Terminal, check_model, OVERLAY, output_without_overlay, feed_output
 from fixture_sync import FixtureSync
 
 EXE = str(Path(sys.argv.pop(1)).resolve())
 WORKER = str(Path(__file__).parent / 'fixtures' / 'terminal_worker.py')
-OVERLAY = re.compile(rb'\x1b\[\?2026h.*?\x1b\[\?2026l', re.S)
-
-
-def output_without_overlay(data):
-    return OVERLAY.sub(b'', data)
 
 
 def cases(cols):
@@ -165,7 +159,10 @@ class TerminalOutput(unittest.TestCase):
                                 fd = masters[master]
                                 if data:
                                     captured[fd].extend(data)
-                                    models[fd].feed(data)
+                                    # Replay the capture so partial child sequences
+                                    # remain visible at each handshake boundary.
+                                    models[fd] = Terminal(rows, cols)
+                                    feed_output(models[fd], bytes(captured[fd]))
                                 else:
                                     os.close(master)
                                     del masters[master]
@@ -201,6 +198,12 @@ class TerminalOutput(unittest.TestCase):
                     # Wait for the collector's initial delay only once. Each
                     # following stage spans several normal 16 ms redraw ticks.
                     drain(.3 if progress else .01)
+                    if any(isinstance(chunk, dict) and chunk.get('unchanged') for chunk in chunks):
+                        deadline = time.monotonic() + 3
+                        while not any('__overlay__' in line and '1/2' in line
+                                      for model in models.values() for line in model.lines()):
+                            self.assertLess(time.monotonic(), deadline, 'missing initial progress')
+                            drain(.01)
                     connection.sendall(b'!')
                     target = 1 if shared else destination
                     for index, chunk in enumerate(chunks):
@@ -211,6 +214,7 @@ class TerminalOutput(unittest.TestCase):
                         expected[target].extend(data)
                         baseline[target].feed(data)
                         frame_start = len(models[target].snapshots)
+                        frame_counts = {fd: model.frames for fd, model in models.items()}
                         deadline = time.monotonic() + 3
                         while output_without_overlay(bytes(captured[target])) != bytes(expected[target]):
                             self.assertLess(time.monotonic(), deadline, ('missing child bytes', index))
@@ -231,6 +235,14 @@ class TerminalOutput(unittest.TestCase):
                                 drain(.01)
                         drain(.15 if settings else (.045 if progress else .001))
                         compare(index)
+                        if settings.get('continuous'):
+                            frames = models[target].snapshots[frame_start:]
+                            self.assertTrue(frames)
+                            self.assertTrue(all(any('__overlay__' in line for line in frame)
+                                                for frame in frames), frames)
+                        if settings.get('unchanged'):
+                            self.assertEqual({fd: model.frames for fd, model in models.items()},
+                                             frame_counts)
                         if 'hidden' in settings:
                             self.assertEqual(any(any(model.overlay) for model in models.values()),
                                              not settings['hidden'], index)
@@ -262,6 +274,30 @@ class TerminalOutput(unittest.TestCase):
 
     def test_model_golden_cases(self):
         check_model()
+
+    def test_log_updates_do_not_present_a_blank_progress_frame(self):
+        for renderer in ('bars', 'tree'):
+            for destination in (1, 2):
+                with self.subTest(renderer=renderer, destination=destination):
+                    self.run_case([
+                        dict(data=b'ready\r\n', frame_lines=['ready']),
+                        dict(data=b'first\r\n', continuous=True),
+                        dict(data=b'second\r\n', continuous=True),
+                        dict(data=b'partial', continuous=True),
+                        dict(data=b' continued\r\n', continuous=True),
+                    ], renderer=renderer, destination=destination)
+
+    def test_unchanged_tree_does_not_redraw(self):
+        self.run_case([
+            dict(data=b'ready\r\n', frame_lines=['ready']),
+            dict(data=b'', unchanged=True),
+        ], renderer='tree')
+
+    def test_other_terminal_output_does_not_redraw_tree(self):
+        self.run_case([
+            dict(data=b'first\r\n', unchanged=True),
+            dict(data=b'second\r\n', unchanged=True),
+        ], renderer='tree', shared=False, destination=1, progress_stream='stderr')
 
     def test_controls(self):
         for renderer in ('bars', 'tree'):
