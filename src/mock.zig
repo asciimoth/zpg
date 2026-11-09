@@ -37,7 +37,7 @@ const Colors = struct {
 fn pause(io: std.Io, random: std.Random, base_ms: u32) !void {
     if (signals.get() != 0) return error.Interrupted;
     const jitter = random.uintLessThan(u32, 170);
-    try io.sleep(.fromMilliseconds(base_ms + jitter), .awake);
+    try io.sleep(.fromMilliseconds(2 * (base_ms + jitter)), .awake);
     if (signals.get() != 0) return error.Interrupted;
 }
 
@@ -162,7 +162,7 @@ fn demonstrateTerminal(io: std.Io, colors: Colors, root: std.Progress.Node) !voi
             "\r\x1b[2K\x1b[32mmock carriage return: [####] 100%\x1b[0m",
         }) |bytes| {
             try output.writeStdout(io, bytes);
-            try io.sleep(.fromMilliseconds(60), .awake);
+            try io.sleep(.fromMilliseconds(120), .awake);
         }
         try output.writeStdout(io, "\n");
         task.completeOne();
@@ -171,12 +171,12 @@ fn demonstrateTerminal(io: std.Io, colors: Colors, root: std.Progress.Node) !voi
         // Leave the cursor above the footer between updates, as a small
         // progress display can do. Both rows must survive zpg's redraws.
         try output.print(io, "\x1b[31mmock footer: waiting\r\nmock footer items: 0/2\x1b[0m\r\x1b[A", .{});
-        try io.sleep(.fromMilliseconds(60), .awake);
+        try io.sleep(.fromMilliseconds(120), .awake);
         try output.print(io, "\r\x1b[2K\x1b[31mmock footer: running\r\n\x1b[2Kmock footer items: 1/2\x1b[0m\r\x1b[A", .{});
-        try io.sleep(.fromMilliseconds(60), .awake);
+        try io.sleep(.fromMilliseconds(120), .awake);
         try output.print(io, "\r\x1b[2K\x1b[31mmock footer: complete\r\n\x1b[2Kmock footer items: 2/2\x1b[0m\r\n", .{});
         task.completeOne();
-        try io.sleep(.fromMilliseconds(60), .awake);
+        try io.sleep(.fromMilliseconds(120), .awake);
     }
 }
 

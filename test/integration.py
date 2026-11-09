@@ -25,9 +25,9 @@ env.pop('UNICODE_PROGRESS_BAR', None)
 env.pop('ZPG_NO_PROGRESS', None)
 env.pop('ZPG_TEST_SYNC', None)
 
-# The full demo sleeps for about four seconds before terminal updates and
+# The full demo sleeps for about eight seconds before terminal updates and
 # process cleanup. Allow extra time for delayed wakeups on CI runners.
-MOCK_TIMEOUT = 15
+MOCK_TIMEOUT = 30
 
 def read_pid(stream, timeout=5):
     deadline = time.monotonic() + timeout
