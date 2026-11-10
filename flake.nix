@@ -140,6 +140,7 @@
                 python3
                 just
                 nixfmt
+                strace
                 gh
                 ghrepo.packages.${system}.ghrepo
 
