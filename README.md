@@ -4,6 +4,12 @@
 
 [![Demo of zpg showing command output and progress](demo.gif)](https://asciinema.org/a/1271890)
 
+Programs outside Zig can report progress with [zppy](https://github.com/asciimoth/zppy)
+for Python, [zpgo](https://github.com/asciimoth/zpgo) for Go,
+[zprs](https://github.com/asciimoth/zprs) for Rust, and
+[zpjs](https://github.com/asciimoth/zpjs) for JavaScript and TypeScript (Node.js).
+See the [Developer guide](#developer-guide) for usage.
+
 ## Installation
 
 `zpg` supports Linux and macOS. Choose one of these installation methods.
@@ -266,6 +272,116 @@ Call `end()` on each node when its task ends.
 
 The program also works without `zpg`. In this case, `std.Progress` controls
 its own display.
+
+#### Python
+
+Install [zppy](https://github.com/asciimoth/zppy) with
+`python -m pip install zppy`. Save this example as `worker.py`:
+
+```python
+import time
+
+from zppy import Progress
+
+with Progress("work", estimated_total_items=4) as progress:
+    for _ in range(4):
+        # Replace this delay with one item of work.
+        time.sleep(0.5)
+        progress.root.complete_one()
+```
+
+Run `zpg python worker.py`. The context manager closes the reporter when
+the block ends.
+
+#### Go
+
+In your Go module, install [zpgo](https://github.com/asciimoth/zpgo) with
+`go get github.com/asciimoth/zpgo`. Save this example as `main.go`:
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+
+    "github.com/asciimoth/zpgo"
+)
+
+func main() {
+    progress, err := zpgo.New(zpgo.Options{
+        RootName:            "work",
+        EstimatedTotalItems: 4,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer progress.Close()
+
+    for i := 0; i < 4; i++ {
+        // Replace this delay with one item of work.
+        time.Sleep(500 * time.Millisecond)
+        progress.Root().CompleteOne()
+    }
+}
+```
+
+Build with `go build -o worker .`, then run `zpg ./worker`.
+
+#### Rust
+
+Add [zprs](https://github.com/asciimoth/zprs) to your Cargo project's
+`Cargo.toml`:
+
+```toml
+[dependencies]
+zprs = "0.1"
+```
+
+Save this example as `src/main.rs`:
+
+```rust
+use std::{thread, time::Duration};
+use zprs::Progress;
+
+fn main() -> std::io::Result<()> {
+    let progress = Progress::new("work", 4)?;
+    for _ in 0..4 {
+        // Replace this delay with one item of work.
+        thread::sleep(Duration::from_millis(500));
+        progress.root().complete_one();
+    }
+    progress.close()
+}
+```
+
+Build with `cargo build`, then run `zpg target/debug/your-program`.
+Replace `your-program` with your Cargo binary name.
+
+#### JavaScript and TypeScript
+
+Install [zpjs](https://github.com/asciimoth/zpjs) with
+`npm install @asciimoth/zpjs`. The package includes TypeScript declarations.
+Save this JavaScript example as `worker.mjs`:
+
+```js
+import { setTimeout as delay } from "node:timers/promises";
+import { Progress } from "@asciimoth/zpjs";
+
+const progress = new Progress({ name: "work", estimatedTotalItems: 4 });
+try {
+    for (let i = 0; i < 4; i++) {
+        // Replace this delay with one item of work.
+        await delay(500);
+        progress.root.completeOne();
+    }
+} finally {
+    progress.close();
+}
+```
+
+Run `zpg node worker.mjs`. For long synchronous work, call `progress.flush()`
+to send updates while the event loop is busy.
 
 #### Scripts
 
