@@ -25,13 +25,6 @@ pub const Snapshot = struct {
     fn record(self: Snapshot, index: usize) []const u8 {
         return self.bytes[1 + index * record_size ..][0..record_size];
     }
-
-    fn hasSibling(self: Snapshot, index: usize) bool {
-        for (index + 1..self.count) |other| {
-            if (self.parent(other) == self.parent(index)) return true;
-        }
-        return false;
-    }
 };
 
 pub fn packetSize(count: u8) usize {
@@ -104,6 +97,22 @@ const Frame = struct {
     lines: usize = 0,
     visited: [254]bool = @splat(false),
     branches: [254]bool = @splat(false),
+    command: ?usize = null,
+
+    fn parent(self: *const Frame, index: usize) u8 {
+        if (self.command) |command| {
+            if (index == command) return no_parent;
+            if (self.snapshot.parent(index) == 0) return @intCast(command);
+        }
+        return self.snapshot.parent(index);
+    }
+
+    fn hasSibling(self: *const Frame, index: usize) bool {
+        for (index + 1..self.snapshot.count) |other| {
+            if (self.parent(other) == self.parent(index)) return true;
+        }
+        return false;
+    }
 
     fn node(self: *Frame, index: usize, depth: usize) std.Io.Writer.Error!void {
         if (self.lines == self.limit or self.visited[index]) return;
@@ -121,7 +130,7 @@ const Frame = struct {
             for (0..depth - 1) |ancestor| {
                 try line.writeAll(if (self.branches[ancestor]) "│  " else "   ");
             }
-            try line.writeAll(if (self.snapshot.hasSibling(index)) "├─ " else "└─ ");
+            try line.writeAll(if (self.hasSibling(index)) "├─ " else "└─ ");
         }
         if (self.mode == .tree) {
             if (total != 0 and total != std.math.maxInt(u32)) {
@@ -136,9 +145,9 @@ const Frame = struct {
         if (self.lines != 0) try self.writer.writeAll("\r\n");
         try clipped(self.writer, line.buffered(), self.width);
         self.lines += 1;
-        if (depth != 0) self.branches[depth - 1] = self.snapshot.hasSibling(index);
+        if (depth != 0) self.branches[depth - 1] = self.hasSibling(index);
         for (0..self.snapshot.count) |child| {
-            if (self.snapshot.parent(child) == index) try self.node(child, depth + 1);
+            if (self.parent(child) == index) try self.node(child, depth + 1);
             if (self.lines == self.limit) break;
         }
     }
@@ -150,6 +159,15 @@ pub fn render(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usi
 }
 
 pub fn renderMode(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize, style: styles.Style, mode: cli.Renderer) !usize {
+    return renderFrame(writer, snapshot, cols, rows, tick, style, mode, false);
+}
+
+/// Hide the supervisor node and place its other children below the command.
+pub fn renderSupervisor(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize, style: styles.Style, mode: cli.Renderer) !usize {
+    return renderFrame(writer, snapshot, cols, rows, tick, style, mode, true);
+}
+
+fn renderFrame(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows: usize, tick: usize, style: styles.Style, mode: cli.Renderer, hide_supervisor: bool) !usize {
     var frame: Frame = .{
         .mode = mode,
         .writer = writer,
@@ -161,7 +179,19 @@ pub fn renderMode(writer: *std.Io.Writer, snapshot: Snapshot, cols: usize, rows:
     };
     if (frame.width == 0 or frame.limit == 0) return 0;
     // Only the first node is the root. Detached or cyclic nodes are omitted.
-    if (snapshot.parent(0) == no_parent) try frame.node(0, 0);
+    if (snapshot.parent(0) == no_parent) {
+        if (hide_supervisor) {
+            for (1..snapshot.count) |index| {
+                if (snapshot.parent(index) == 0) {
+                    frame.command = index;
+                    try frame.node(index, 0);
+                    break;
+                }
+            }
+        } else {
+            try frame.node(0, 0);
+        }
+    }
     return frame.lines;
 }
 
@@ -361,4 +391,24 @@ test "plain tree counters use the shared clipped frame" {
     var writer = std.Io.Writer.fixed(&buffer);
     try std.testing.expectEqual(@as(usize, 2), try renderMode(&writer, snapshot, 80, 24, 0, .{}, .tree));
     try std.testing.expectEqualStrings("[1/2] build\r\n└─ files", writer.buffered());
+}
+
+test "supervisor tree starts at the command and keeps estimates below it" {
+    var packet: [1024]u8 = undefined;
+    const bytes = testPacket(&packet, &.{ 255, 0, 1, 0 }, &.{ "zpg", "build", "compile", "I/O estimate" });
+    std.mem.writeInt(u32, bytes[1 + record_size ..][0..4], 1, .little);
+    std.mem.writeInt(u32, bytes[1 + record_size + 4 ..][0..4], 2, .little);
+    const snapshot = try Snapshot.init(bytes);
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectEqual(@as(usize, 3), try renderSupervisor(&writer, snapshot, 80, 24, 0, .{}, .tree));
+    try std.testing.expectEqualStrings("[1/2] build\r\n├─ compile\r\n└─ I/O estimate", writer.buffered());
+
+    writer.end = 0;
+    try std.testing.expectEqual(@as(usize, 3), try renderSupervisor(&writer, snapshot, 80, 24, 0, .{}, .bars));
+    try std.testing.expectEqualStrings("build [######------] 50% 1/2\r\n├─ compile |\r\n└─ I/O estimate |", writer.buffered());
+
+    writer.end = 0;
+    try std.testing.expectEqual(@as(usize, 4), try renderMode(&writer, snapshot, 80, 24, 0, .{}, .tree));
+    try std.testing.expectEqualStrings("zpg\r\n├─ [1/2] build\r\n│  └─ compile\r\n└─ I/O estimate", writer.buffered());
 }

@@ -99,7 +99,7 @@ fn receive(io: std.Io, file: std.Io.File, style: styles.Style, mode: cli.Rendere
             .arg = &size,
         } }) catch return;
         var frame = std.Io.Writer.fixed(&frame_buffer);
-        const lines = renderer.renderMode(&frame, snapshot, size.col, size.row, tick / 5, style, mode) catch continue;
+        const lines = renderer.renderSupervisor(&frame, snapshot, size.col, size.row, tick / 5, style, mode) catch continue;
         const padded_lines = height.pad(&frame, lines, size.row) catch continue;
         // A failed display must not stop draining the progress pipe and block
         // the stdlib collector. The log writer reports output errors separately.

@@ -7,7 +7,7 @@ run *args:
 
 demo:
     zig build
-    PATH="./zig-out/bin:$PATH" zpg zpg --mock
+    PATH="./zig-out/bin:$PATH" zpg --name mock zpg --mock
 
 vhs:
     zig build

@@ -336,7 +336,7 @@ frames = [frame.split(b'\x1b[?2026l', 1)[0]
           for frame in log.split(b'\x1b[?2026h')]
 # Short demo stages can finish between redraws. Exact labels and counts are
 # checked below with fixtures that wait for the displayed frame.
-assert any(b'zpg' in frame for frame in frames), frames
+assert any(b'\rmock [' in frame for frame in frames), frames
 for name in (b'indexer', b'compiler', b'uploader'):
     assert b'mock worker ' + name + b': complete' in log, (name, log)
 assert b'mock stdout:' in p.communicate(timeout=2)[0] and b'mock stderr:' in log
@@ -496,11 +496,15 @@ if sys.platform.startswith('linux'):
                                        checkpoints=[(1, rb'25% 256/1024'),
                                                     (3, rb'75% 768/1024'),
                                                     ('closed', rb'I/O estimate \(unknown\)')])
+            if command[0] != exe:
+                assert b'\rzpg ' not in capture, capture
             assert b'I/O estimate (bytes): input.bin' in capture, capture
             assert b'25% 256/1024' in capture, capture
             assert b'75% 768/1024' in capture, capture
-            last_known = capture.rfind(b'75% 768/1024')
-            assert b'I/O estimate (unknown)' in capture[last_known:], capture
+            known = (capture.find if command[0] == exe else capture.rfind)(b'75% 768/1024')
+            # The outer estimate can become unknown while the nested one
+            # still shows its last known count.
+            assert b'I/O estimate (unknown)' in capture[known:], capture
             logs = output_without_overlay(capture)
             assert logs == b'copy step\r\n' * 2, logs
         capture = terminal_capture(['--guess', '--renderer', 'tree', *args],
@@ -685,6 +689,7 @@ assert run('--renderer', 'bars', render_probe) == expected_logs
 capture = terminal_capture([render_probe], rows=8)
 frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)
 assert frames
+assert all(b'\rzpg ' not in frame for frame in frames), frames
 assert any(b'[#########---] 75% 3/4' in frame for frame in frames)
 assert any(b'[############] 100% 7/4' in frame for frame in frames)
 spinner_frames = set(re.findall(rb'unknown ([|/\\-]) 2 done', capture))
@@ -779,6 +784,10 @@ assert '█'.encode() in capture
 capture = terminal_capture(['--renderer', 'tree', render_probe])
 assert b'\x1b' in capture and b'render probe' in capture
 assert b'[#########---]' not in capture
+tree_frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)
+assert any(b'\rrender-probe' in frame or b'\r[3/4] render probe' in frame
+           for frame in tree_frames), tree_frames
+assert all(b'zpg' not in frame for frame in tree_frames), tree_frames
 capture = terminal_capture([render_probe], extra_env={'NO_COLOR': '1'})
 assert b'[#########---] 75% 3/4' in capture
 # An independent worker can now render its own output after detecting a TTY.
@@ -802,7 +811,10 @@ for renderer in ('bars', 'tree'):
             control_capture = terminal_capture(['--renderer', renderer, *prefix,
                                                  sys.executable, fixture, 'controls', fd], rows=8)
             visible = [line for line in replay_terminal(control_capture, 8, 80) if line]
-            assert visible == control_expected, visible
+            # A saved cursor on the last row can point at a different line
+            # after scrolling. Fewer progress rows change when that scroll occurs.
+            scrolled = control_expected[:13] + ['saved:', '       restored'] + control_expected[14:]
+            assert visible in (control_expected, scrolled), (renderer, prefix, fd, visible)
             # After removing zpg's drawing, all child control bytes must remain.
             raw = output_without_overlay(control_capture)
             direct = run('--no-progress', sys.executable, fixture, 'controls', fd,
