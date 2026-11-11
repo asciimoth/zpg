@@ -45,6 +45,9 @@ demo-git: (_demo-guess "git")
 # Transcode a generated video at its playback speed (Linux).
 demo-ffmpeg: (_demo-guess "ffmpeg")
 
+# Run cp, curl, and ffmpeg in parallel with temporary local data (Linux).
+demo-tasks: (_demo-guess "tasks")
+
 [private]
 _demo-guess tool:
     zig build

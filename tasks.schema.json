@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "zpg tasks file",
+  "description": "Run with zpg [options] --tasks FILE.json [values...]. All tasks start in parallel in the current working directory and inherit the environment. Files must be at most 1 MiB. Unknown properties are errors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tasks"],
+  "properties": {
+    "$schema": {
+      "type": ["string", "null"],
+      "description": "Optional editor schema reference. zpg does not fetch this URL."
+    },
+    "stop_on_first_finish": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, stop all other task process groups when the first task exits, whether it succeeds or fails. Return that task's status. Otherwise wait for all tasks and return the first nonzero status in file order, or zero if all succeed. Shutdown sends SIGTERM, then SIGKILL after two seconds if needed."
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2147483647,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command"],
+        "properties": {
+          "name": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "pattern": "^[^\u0000]*$",
+            "description": "Progress label under the tasks root. Defaults to the command basename. No argument substitution in names."
+          },
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "prefixItems": [{"type": "string", "minLength": 1, "pattern": "^[^\u0000]*$"}],
+            "items": {"type": "string", "pattern": "^[^\u0000]*$"},
+            "description": "Executable followed by arguments, with PATH lookup and no implicit shell. In each element, {{.1}}, {{.2}}, etc. insert values after FILE.json. Indices start at 1, without leading zeroes. Substitution is literal, can occur inside an argument, and is not repeated on inserted text. Missing values or malformed {{. templates are errors before any task starts. Use sh -c explicitly for shell commands; pass substituted data as separate shell arguments. NUL bytes and an empty executable are errors."
+          },
+          "guess": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable Linux I/O and activity estimates for this task's process group. Native progress reports still appear."
+          }
+        }
+      }
+    }
+  }
+}

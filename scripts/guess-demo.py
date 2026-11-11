@@ -24,6 +24,7 @@ TOOLS = {
     'curl': ('curl',),
     'git': ('git',),
     'ffmpeg': ('ffmpeg',),
+    'tasks': ('cp', 'strace', 'curl', 'ffmpeg'),
 }
 
 
@@ -174,12 +175,28 @@ def demo(tool, directory):
         print('Watch TCP activity while Git clones a local repository (about 9 seconds).', flush=True)
         with slow_http(repo / '.git') as url:
             show([*git, 'clone', '--quiet', url + '/', 'cloned'], env=env)
-    elif tool == 'ffmpeg':
+    elif tool in ('ffmpeg', 'tasks'):
         common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-nostats']
         run([*common, '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
              '-t', '10', '-c:v', 'mpeg4', '-q:v', '5', 'input.avi'], cwd=directory)
-        print('Watch input reads and CPU activity at playback speed (about 10 seconds).', flush=True)
-        show([*common, '-re', '-i', 'input.avi', '-c:v', 'mpeg4', '-q:v', '3', 'output.avi'])
+        if tool == 'ffmpeg':
+            print('Watch input reads and CPU activity at playback speed (about 10 seconds).', flush=True)
+            show([*common, '-re', '-i', 'input.avi', '-c:v', 'mpeg4', '-q:v', '3', 'output.avi'])
+        else:
+            source = directory / 'source'
+            (source / 'nested').mkdir(parents=True)
+            data_file(source / 'first.bin', mib=2)
+            data_file(source / 'nested' / 'second.bin', mib=2)
+            data_file(directory / 'download.bin')
+            print('Watch three tasks with verbose output (about 10 seconds).', flush=True)
+            with slow_http(directory) as url:
+                command = [zpg, '--tasks', str(ROOT / 'example.json'), str(directory), url]
+                print('+ ' + shlex.join(command), flush=True)
+                run(command, cwd=directory)
+            for relative in ('first.bin', 'nested/second.bin'):
+                assert (source / relative).read_bytes() == (directory / 'copied' / relative).read_bytes()
+            assert (directory / 'download.bin').read_bytes() == (directory / 'received.bin').read_bytes()
+            assert (directory / 'output.avi').stat().st_size > 0
     print('Demo complete. Temporary files removed on exit.', flush=True)
 
 

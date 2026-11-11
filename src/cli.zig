@@ -15,6 +15,7 @@ pub const Options = struct {
     mock: bool = false,
     help: bool = false,
     report: ?Report = null,
+    tasks_file: ?[]const u8 = null,
     renderer: Renderer = .bars,
     progress_stream: ProgressStream = .auto,
     style: style.Style = .{},
@@ -22,6 +23,7 @@ pub const Options = struct {
 };
 pub const usage =
     \\Usage: zpg [options] <command> [args...]
+    \\       zpg [options] --tasks FILE.json [values...]
     \\       zpg [options] --mock
     \\       zpg --report COMPLETED TOTAL [--name TEXT]
     \\       zpg --help
@@ -40,6 +42,7 @@ pub const usage =
     \\  --test                      Log raw progress snapshots and protocol errors
     \\  --test-output FILE          Save test log to FILE (default: stderr)
     \\  --guess                     Estimate input progress and activity (Linux)
+    \\  --tasks FILE.json           Run parallel tasks; remaining args are values
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\  --                        End options before a command starting with '-'
     \\
@@ -82,6 +85,12 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
             o.test_output = args[i];
         } else if (std.mem.eql(u8, a, "--guess")) {
             o.guess = true;
+        } else if (std.mem.eql(u8, a, "--tasks")) {
+            i += 1;
+            if (i == args.len or args[i].len == 0) return error.MissingTasksFile;
+            o.tasks_file = args[i];
+            o.argv = args[i + 1 ..];
+            break;
         } else if (std.mem.eql(u8, a, "--report")) {
             if (o.report != null) return error.DuplicateReport;
             if (args.len - i < 3) return error.MissingReportCounts;
@@ -114,13 +123,25 @@ pub fn parse(args: []const []const u8, unicode_progress_bar: ?[]const u8) !Optio
         }
     }
     if (o.test_output != null and !o.test_mode) return error.TestOutputRequiresTest;
+    if (o.tasks_file != null and (o.mock or o.report != null or o.guess or o.test_mode or name != null)) return error.IncompatibleTasksOptions;
     if (o.test_mode and (o.mock or o.report != null or o.guess or !o.progress)) return error.IncompatibleTestOptions;
     if (o.mock and o.argv.len != 0) return error.MockWithCommand;
     if (o.report != null and (o.mock or o.argv.len != 0)) return error.ReportWithCommand;
     if (o.guess and (o.mock or o.report != null)) return error.GuessRequiresCommand;
-    if (!o.mock and !o.help and o.report == null and o.argv.len == 0) return error.MissingCommand;
+    if (!o.mock and !o.help and o.report == null and o.tasks_file == null and o.argv.len == 0) return error.MissingCommand;
     o.name = name orelse if (o.report != null) "" else if (o.argv.len != 0) std.fs.path.basename(o.argv[0]) else "mock";
     return o;
+}
+
+test "tasks consumes all remaining arguments as template values" {
+    const o = try parse(&.{ "--renderer", "tree", "--tasks", "jobs.json", "--guess", "", "a b" }, null);
+    try std.testing.expectEqualStrings("jobs.json", o.tasks_file.?);
+    try std.testing.expectEqualSlices([]const u8, &.{ "--guess", "", "a b" }, o.argv);
+    try std.testing.expect((try parse(&.{ "--tasks", "jobs.json" }, null)).tasks_file != null);
+    try std.testing.expectError(error.MissingTasksFile, parse(&.{"--tasks"}, null));
+    for ([_][]const u8{ "--guess", "--mock", "--test" }) |option| {
+        try std.testing.expectError(error.IncompatibleTasksOptions, parse(&.{ option, "--tasks", "jobs.json" }, null));
+    }
 }
 
 test "progress stream selection preserves child flags and no-progress" {

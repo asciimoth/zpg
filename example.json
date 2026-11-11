@@ -1,0 +1,35 @@
+{
+  "$schema": "./tasks.schema.json",
+  "tasks": [
+    {
+      "name": "cp recursive",
+      "guess": true,
+      "command": [
+        "strace", "-f", "-qq", "-o", "/dev/null",
+        "-e", "trace=read,copy_file_range",
+        "-e", "inject=read:delay_enter=150ms",
+        "-e", "inject=copy_file_range:error=ENOSYS",
+        "cp", "-rv", "--reflink=never", "--sparse=never",
+        "{{.1}}/source", "{{.1}}/copied"
+      ]
+    },
+    {
+      "name": "curl download",
+      "guess": true,
+      "command": [
+        "curl", "--verbose", "--fail", "--show-error", "--noproxy", "*",
+        "{{.2}}/download.bin", "--output", "{{.1}}/received.bin"
+      ]
+    },
+    {
+      "name": "ffmpeg transcode",
+      "guess": true,
+      "command": [
+        "env", "AV_LOG_FORCE_NOCOLOR=1", "ffmpeg",
+        "-hide_banner", "-loglevel", "verbose", "-nostdin",
+        "-re", "-i", "{{.1}}/input.avi", "-c:v", "mpeg4", "-q:v", "3",
+        "{{.1}}/output.avi"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 """Behavior checks for pipes, process cleanup, and terminal progress."""
 import errno
+import json
 import fcntl
 import struct
 import termios
@@ -1118,3 +1119,140 @@ for args in [('--test-output', 'log', 'true'), ('--test', '--test-output'),
              ('--test', '--mock'), ('--test', '--no-progress', 'true'),
              ('--test', '--guess', 'true'), ('--test', '--report', '0', '1')]:
     capture_output(*args, code=2)
+
+# Tasks share output and progress, but have independent process groups.
+tasks_fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'tasks_worker.py')
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    tasks_path = root / 'tasks.json'
+
+    def task_file(tasks, **options):
+        tasks_path.write_text(json.dumps(dict(tasks=tasks, **options)))
+        return str(tasks_path)
+
+    def task_worker(mode, fixture_name, *args, **options):
+        return dict(command=[sys.executable, tasks_fixture, mode, directory, fixture_name, *args],
+                    **options)
+
+    # Both workers must start before either one can finish. Nonzero exits do
+    # not cancel other tasks by default; all completion markers must exist.
+    task_file([task_worker('barrier', 'alpha', 'beta', '7'),
+               task_worker('barrier', 'beta', 'alpha', '9', guess=True)])
+    p = capture_output('--tasks', str(tasks_path), code=7)
+    assert sorted(p.stdout.splitlines()) == [b'alpha stdout', b'beta stdout'], p
+    assert sorted(p.stderr.splitlines()) == [b'alpha stderr', b'beta stderr'], p
+    assert all((root / (name + '.done')).exists() for name in ('alpha', 'beta'))
+
+    # Each stream receives a binary payload larger than the queue's chunks.
+    task_file([dict(command=[sys.executable, fixture, 'bytes', str(fd)]) for fd in (1, 2)])
+    p = capture_output('--tasks', str(tasks_path))
+    assert p.stdout == payload and p.stderr == payload
+    p = capture_output('--no-progress', '--tasks', str(tasks_path))
+    assert p.stdout == payload and p.stderr == payload
+
+    task_file([dict(command=[sys.executable, '-c',
+                            'import json,sys; print(json.dumps(sys.argv[1:]))',
+                            '{{.1}}', 'prefix/{{.2}}', '{{.3}}', '{{.1}}'])])
+    p = capture_output('--tasks', str(tasks_path), '--flag with spaces;$HOME', '{{.1}}', '')
+    assert json.loads(p.stdout) == ['--flag with spaces;$HOME', 'prefix/{{.1}}', '',
+                                   '--flag with spaces;$HOME']
+    assert p.stderr == b''
+
+    # Invalid later tasks must not allow earlier commands to run.
+    marker = root / 'must-not-start'
+    valid_task = dict(command=[sys.executable, '-c',
+                              'from pathlib import Path; Path(__import__("sys").argv[1]).touch()',
+                              str(marker)])
+    for invalid in [dict(command=[]), dict(command=['']), dict(command=['true', '{{.2}}']),
+                    dict(command=['true', '{{.0}}']), dict(command=['true'], guess='yes'),
+                    dict(command=['true'], typo=True), dict(command=['a\x00b'])]:
+        task_file([valid_task, invalid])
+        capture_output('--tasks', str(tasks_path), code=2)
+        assert not marker.exists()
+    for invalid in ['{', '[]', '{"tasks":[]}', '{"tasks":[{"command":"true"}]}']:
+        tasks_path.write_text(invalid)
+        capture_output('--tasks', str(tasks_path), code=2)
+    capture_output('--tasks', str(root / 'missing.json'), code=2)
+
+    # First-finish returns the winner's status, including success, and forces
+    # both remaining groups to exit when they ignore SIGTERM.
+    for status in (0, 23):
+        names = [f'hold-{status}-{index}' for index in range(2)]
+        task_file([task_worker('family', name) for name in names] +
+                  [task_worker('winner', 'winner', str(status), *names)],
+                  stop_on_first_finish=True)
+        started = time.monotonic()
+        capture_output('--tasks', str(tasks_path), code=status)
+        assert time.monotonic() - started >= 1.8
+        for name in names:
+            pid = int((root / name).read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError(f'task {pid} was not reaped')
+            # An orphan can remain a zombie until the host reaps it. It must
+            # not be running, and it must no longer hold our output pipes.
+            child = int((root / (name + '.child')).read_text())
+            state = subprocess.run(['ps', '-o', 'stat=', '-p', str(child)],
+                                   capture_output=True, text=True, timeout=5).stdout.strip()
+            assert not state or state.startswith('Z'), (child, state)
+
+    # Interrupt every group, including when estimates are enabled.
+    names = ['signal-one', 'signal-two']
+    task_file([task_worker('hold', name, guess=True) for name in names])
+    p = subprocess.Popen([exe, '--tasks', str(tasks_path)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not all((root / name).exists() for name in names):
+            assert time.monotonic() < deadline, 'tasks did not start'
+            time.sleep(.01)
+        p.send_signal(signal.SIGINT)
+        stdout, stderr = p.communicate(timeout=8)
+        assert (p.returncode, stdout, stderr) == (130, b'', b'')
+        for name in names:
+            try:
+                os.kill(int((root / name).read_text()), 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError('interrupted task was not reaped')
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+    # Launch failure must terminate a task already blocked on output.
+    task_file([dict(command=[sys.executable, fixture, 'volume']),
+               dict(command=['zpg-command-that-does-not-exist'])])
+    capture_output('--tasks', str(tasks_path), code=1)
+    if sys.platform.startswith('linux'):
+        task_file([dict(command=[sys.executable, fixture, 'volume']) for _ in range(2)])
+        with open('/dev/full', 'wb') as sink:
+            p = subprocess.run([exe, '--tasks', str(tasks_path)], stdout=sink,
+                               stderr=subprocess.PIPE, env=env, timeout=8)
+        assert p.returncode == 1
+
+    task_file([task_worker('progress', 'native-one', name='one'),
+               task_worker('progress', 'native-two', name='two', guess=True)])
+    for prefix in ([], ['--renderer', 'tree'], [exe]):
+        capture = terminal_capture([*prefix, '--tasks', str(tasks_path)], rows=25,
+                                   checkpoints=[('tasks-visible',
+                                                 rb'tasks.*native-one.*native-two')])
+        assert b'tasks' in capture and b'native-one' in capture and b'native-two' in capture
+        assert b'I/O estimate' in capture and progress_cleared(capture), capture
+    capture = terminal_capture(['--no-progress', '--tasks', str(tasks_path)])
+    assert capture == b'', capture
+
+    # The root counts completed commands, regardless of each native report's
+    # own item count. Keep the second command alive until 1/2 is displayed.
+    task_file([task_worker('progress', 'native-one', 'first', name='one'),
+               task_worker('progress', 'native-two', 'second', name='two')])
+    capture = terminal_capture(['--tasks', str(tasks_path)],
+                               checkpoints=[('first', rb'tasks.*native-one.*native-two'),
+                                            ('second', rb'tasks .*50% 1/2.*native-two')])
+    assert progress_cleared(capture), capture
+
+print('parallel tasks checks passed')

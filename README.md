@@ -1,6 +1,6 @@
 # zpg
 
-`zpg` runs a command with a progress overlay.
+`zpg` runs commands with a progress overlay.
 
 [![Demo of zpg showing command output and progress](demo.gif)](https://asciinema.org/a/1271890)
 
@@ -107,6 +107,60 @@ Use `zpg [options] <command> [args...]`. Put `zpg` options before the command.
 `PATH` to find commands. To use shell syntax, run `zpg sh -c '...'`. If a
 command name starts with a hyphen, put `--` before the name. Run `zpg --help`
 for all options.
+
+### Parallel tasks
+
+Use `zpg [options] --tasks FILE.json [values...]` to run tasks in parallel.
+Put all zpg options before `--tasks`. Arguments after the file name are
+substitution values, including arguments that start with `-`.
+
+```json
+{
+  "$schema": "./tasks.schema.json",
+  "tasks": [
+    {"name": "copy", "command": ["cp", "-rv", "{{.1}}", "{{.2}}"], "guess": true},
+    {"name": "build", "command": ["make", "-j4"]}
+  ],
+  "stop_on_first_finish": false
+}
+```
+
+Run this file with `zpg --tasks tasks.json source-dir backup-dir`.
+The [JSON schema](tasks.schema.json) defines the format. A file must contain
+at least one task and must not exceed 1 MiB. Unknown fields are errors.
+
+Each `command` is an array with the executable and its arguments. zpg uses
+`PATH` to find the executable. Tasks inherit the current directory and
+environment. A `name` is optional and defaults to the command's basename.
+Set `guess: true` on a task to enable Linux progress estimates alongside its
+native progress reports. The shared progress tree has a `tasks` root.
+Do not combine `--tasks` with `--name`, `--guess`, `--mock`, `--report`, or
+`--test`. Display options such as `--renderer tree` and `--no-progress` work.
+
+In command arguments, `{{.1}}` inserts the first value after the file name,
+`{{.2}}` inserts the second, and so on. Values can be inserted inside an
+argument, such as `{{.1}}/output.bin`. Spaces and shell characters remain
+literal text in that argument. Inserted text is not expanded again. Indices
+start at 1 and must not have leading zeroes. A missing value or malformed
+`{{.` template fails before any task starts. Names are not templates.
+
+There is no implicit shell. For shell syntax, use an explicit command such
+as `["sh", "-c", "cp -- \"$1\" \"$2\"", "copy", "{{.1}}", "{{.2}}"]`.
+Pass substituted values as separate arguments to keep them out of shell code.
+
+All task stdout goes to zpg stdout. All task stderr goes to zpg stderr.
+Bytes and order within each task's stream stay unchanged; output from different
+tasks can interleave. Tasks share inherited stdin when it is a file or pipe;
+input is not copied to each task. Terminal stdin is empty, as in command mode.
+
+By default, zpg waits for every task. It returns zero if all tasks succeed,
+or the first nonzero status in file order. Set `stop_on_first_finish: true`
+to stop the other task process groups when the first task exits, on success
+or failure, and return that task's status. If several tasks finish together,
+the first observed exit wins. Signals return `128 + signal`. On Ctrl-C,
+SIGTERM, or an output failure, zpg stops all task groups. Shutdown uses SIGTERM
+and forces remaining processes to stop after two seconds. A launch failure
+stops tasks that already started and returns 1. Invalid tasks files return 2.
 
 ### Progress display
 
