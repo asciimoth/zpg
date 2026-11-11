@@ -141,7 +141,7 @@ fn check_errno(failure: linux.E) !void {
         .SUCCESS => {},
         .NOENT => return error.FileNotFound,
         .ACCES, .PERM => return error.AccessDenied,
-        .AGAIN, .NOMEM => return error.SystemResources,
+        .AGAIN, .NOMEM, .@"2BIG" => return error.SystemResources,
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NFILE => return error.SystemFdQuotaExceeded,
         .NAMETOOLONG => return error.NameTooLong,
@@ -170,4 +170,16 @@ test "failed exec releases paths, descriptors and child processes" {
     try std.testing.expectEqual(before, after);
     var status: i32 = undefined;
     try std.testing.expectEqual(linux.E.CHILD, linux.errno(linux.waitpid(-1, &status, linux.W.NOHANG)));
+}
+
+test "oversized executable arguments return a normal launch error" {
+    const sink: linux.fd_t = @intCast(try check(linux.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)));
+    defer _ = linux.close(sink);
+    // Linux limits each argument to 32 pages, even when ARG_MAX is larger.
+    const argument = try std.testing.allocator.allocSentinel(u8, std.heap.pageSize() * 32, 0);
+    defer std.testing.allocator.free(argument);
+    @memset(argument, 'x');
+    const argv = [_:null]?[*:0]const u8{ "/proc/self/exe", argument.ptr };
+    const env = [_:null]?[*:0]const u8{};
+    try std.testing.expectError(error.SystemResources, spawn(std.testing.allocator, &argv, &env, "", sink, sink, sink, false));
 }

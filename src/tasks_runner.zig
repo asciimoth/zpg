@@ -86,7 +86,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     for (config.tasks, jobs, 0..) |task, *job, index| {
         // Launching many tasks can take time. Stop creating processes as soon
         // as shutdown is requested, then use the normal group shutdown below.
-        if (signals.get() != 0 or failed.load(.acquire)) break;
+        if (signals.get() != 0 or failed.load(.acquire) or
+            (config.stop_on_first_finish and first.load(.acquire) != std.math.maxInt(usize))) break;
         job.node = tree.start(task.name orelse std.fs.path.basename(task.command[0]), 0);
         // Keep estimates beside the IPC node: ending a local child of an IPC
         // node would change the pipe index stored in its completed count.

@@ -131,7 +131,7 @@ fn check(result: c_int) !void {
         .SUCCESS => {},
         .NOENT => return error.FileNotFound,
         .ACCES, .PERM => return error.AccessDenied,
-        .AGAIN, .NOMEM => return error.SystemResources,
+        .AGAIN, .NOMEM, .@"2BIG" => return error.SystemResources,
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NFILE => return error.SystemFdQuotaExceeded,
         .NAMETOOLONG => return error.NameTooLong,

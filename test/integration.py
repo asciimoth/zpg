@@ -1278,6 +1278,15 @@ with tempfile.TemporaryDirectory() as directory:
         assert not marker.exists(), ('task started after interrupt', sig, p.stderr)
         assert b'drain timeout' not in p.stderr, p.stderr
 
+    # A winner observed during launch must also prevent later tasks from starting.
+    # A missing executable makes an unwanted launch observable even if its
+    # process would have been killed before it could write a marker.
+    task_file([dict(command=['true']) for _ in range(31)] +
+              [dict(command=[str(root / 'must-not-launch')])],
+              stop_on_first_finish=True)
+    p = capture_output('--tasks', str(tasks_path))
+    assert p.stderr == b'', p.stderr
+
     # First-finish returns the winner's status, including success, and forces
     # both remaining groups to exit when they ignore SIGTERM.
     for status in (0, 23):
