@@ -68,7 +68,7 @@ def slow_reads(command, delay_ms, *, copy=False):
 
 
 def copy_command(source, target):
-    return slow_reads(['cp', '--reflink=never', '--sparse=never',
+    return slow_reads(['cp', '-v', '--reflink=never', '--sparse=never',
                        str(source), str(target)], 350, copy=True)
 
 

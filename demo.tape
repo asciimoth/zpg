@@ -1,6 +1,11 @@
 Output zig-out/demo.gif
 
 Require strace
+Require python3
+Require cp
+Require git
+Require curl
+Require ffmpeg
 
 Set Shell "bash"
 Set FontFamily "Fira Code"
@@ -10,28 +15,54 @@ Set FontSize 13
 Set LetterSpacing 0
 Set Width 780
 Set Height 650
-Set LoopOffset 20%
+# Start the GIF during the mock progress tree.
+Set LoopOffset 10%
+Set WaitTimeout 60s
 
 Env PS1 "$ "
 Env UNICODE_PROGRESS_BAR "true"
+Hide
+Type `cd "$ZPG_RECORDING_DIR"; clear`
+Enter
+Sleep 500ms
+Show
 Type "zpg zpg --mock"
 Sleep 500ms
 Enter
 Sleep 10s
 
-# Prepare 6 MiB of files and a cp wrapper that delays reads for this recording.
-# The shell removes the temporary files when it exits.
 Hide
-Type "source scripts/demo-copy-setup.sh"
-Enter
-Sleep 1s
 Type "clear"
 Enter
 Sleep 500ms
 Show
-Type "# Recursive copy (6 MiB; reads slowed for this demo)"
-Enter
-Type "zpg --guess cp -rv source/ copy/"
+Type `zpg --guess sh -c 'for f in input/*.bin; do cp -v "$f" copy/ & done; wait'`
 Sleep 500ms
 Enter
-Sleep 13s
+Sleep 1s
+Wait+Line /^\$$/
+Sleep 1s
+
+Hide
+Type "clear"
+Enter
+Sleep 500ms
+Show
+Type `zpg --guess git clone "$REPO_URL" cloned`
+Sleep 500ms
+Enter
+Sleep 1s
+Wait+Line /^\$$/
+Sleep 1s
+
+Hide
+Type "clear"
+Enter
+Sleep 500ms
+Show
+Type "zpg --tasks tasks.json"
+Sleep 500ms
+Enter
+Sleep 1s
+Wait+Line /^\$$/
+Sleep 500ms

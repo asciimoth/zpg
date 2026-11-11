@@ -2,7 +2,7 @@
 
 `zpg` runs commands with a progress overlay.
 
-[![Demo of zpg showing command output and progress](demo.gif)](https://asciinema.org/a/1271890)
+[![Demo of zpg showing command output and progress](https://vhs.charm.sh/vhs-5OKsqixxKTapPmjdIv2Qhf.gif)](https://asciinema.org/a/1271890)
 
 Programs outside Zig can report progress with [zppy](https://github.com/asciimoth/zppy)
 for Python, [zpgo](https://github.com/asciimoth/zpgo) for Go,

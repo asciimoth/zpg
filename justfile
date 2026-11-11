@@ -10,8 +10,9 @@ demo:
     PATH="./zig-out/bin:$PATH" zpg --name mock zpg --mock
 
 vhs:
+    vhs validate demo.tape
     zig build
-    PATH="./zig-out/bin:$PATH" vhs demo.tape
+    python3 scripts/record-demo.py
 
 demo-test:
     zig build
@@ -24,7 +25,7 @@ demo-report:
 # Copy one file with delayed reads (Linux, strace).
 demo-cp: (_demo-guess "cp")
 
-# Copy three files in parallel to show a tree (Linux, strace).
+# Copy three files in parallel with verbose output to show a tree (Linux, strace).
 demo-cp-parallel: (_demo-guess "cp-parallel")
 
 # Extract an archive with delayed reads (Linux, strace).
