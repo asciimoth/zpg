@@ -79,7 +79,12 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         const result = try waiter.await(io);
         if (estimator) |*task| task.cancel(io);
         estimator = null;
+        // The leader can exit on SIGTERM while a descendant ignores it.
+        // Finish stopping the group even after the waiter has completed.
+        if (shutdown.started) std.posix.kill(-pid, .KILL) catch {};
         const truncated = !try process_wait.wait_for_drain(io, &done, if (o.test_mode) 3 else 2);
+        // Interrupts and output failures can also occur during pipe draining.
+        if (signals.get() != 0 or failed.load(.acquire)) std.posix.kill(-pid, .KILL) catch {};
         if (logger) |*task| task.cancel(io);
         logger = null;
         if (o.test_mode and truncated) try test_log.print(io, "progress/output drain timeout; capture incomplete", .{});

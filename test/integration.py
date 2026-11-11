@@ -204,6 +204,44 @@ for sig, mode in [(signal.SIGINT, 'stop'), (signal.SIGTERM, 'stop'), (signal.SIG
         pass
     else:
         raise AssertionError('child not reaped')
+# Shutdown must also stop descendants when the leader exits on SIGTERM, or
+# when the interrupt arrives after the leader exits during pipe draining.
+for prefix in ([], ['--test']):
+    for during_drain in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            p = subprocess.Popen([exe, *prefix, sys.executable, fixture, 'shutdown-family'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=dict(env, ZPG_TEST_SYNC=directory))
+            descendant = None
+            try:
+                descendant = read_pid(p.stdout)
+                if during_drain:
+                    (pathlib.Path(directory) / 'parent-exit').touch()
+                    parent = int((pathlib.Path(directory) / 'parent-pid').read_text())
+                    deadline = time.monotonic() + 5
+                    while True:
+                        try:
+                            os.kill(parent, 0)
+                        except ProcessLookupError:
+                            break
+                        assert time.monotonic() < deadline, 'leader was not reaped'
+                        time.sleep(.01)
+                p.send_signal(signal.SIGINT)
+                _, log = p.communicate(timeout=8)
+                assert p.returncode == 130, (p.returncode, log)
+                state = subprocess.run(['ps', '-o', 'stat=', '-p', str(descendant)],
+                                       capture_output=True, text=True, timeout=5).stdout.strip()
+                assert not state or state.startswith('Z'), (descendant, state, log)
+            finally:
+                if descendant is not None:
+                    try:
+                        os.kill(descendant, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+
 # Keep the descendant alive until the check ends. A fixed child lifetime can
 # expire before the supervisor's drain deadline on a busy runner.
 with tempfile.TemporaryDirectory() as directory:

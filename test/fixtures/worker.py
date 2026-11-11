@@ -65,6 +65,17 @@ elif mode in ('stop', 'stubborn'):
     print(os.getpid(), flush=True)
     while True:
         time.sleep(1)
+elif mode == 'shutdown-family':
+    from pathlib import Path
+    (Path(os.environ['ZPG_TEST_SYNC']) / 'parent-pid').write_text(str(os.getpid()))
+    pid = os.fork()
+    if pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        print(os.getpid(), flush=True)
+        while True:
+            time.sleep(1)
+    checkpoint('parent-exit')
+    os._exit(0)
 elif mode == 'descendant':
     pid = os.fork()
     if pid == 0:
