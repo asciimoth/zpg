@@ -152,8 +152,9 @@ renderer and styles on the outermost `zpg` command.
 
 ### Progress estimates
 
-Use `--guess` for commands that do not report progress. On Linux, `zpg` estimates
-progress for one open input file, including a file that a child process reads.
+Use `--guess` for commands that do not report progress. On Linux, `zpg` samples
+file and process metadata across the command's process group. It estimates
+progress for open input files, including files that child processes read.
 For example, add progress to common Unix commands that read a file:
 
 ```sh
@@ -165,14 +166,6 @@ zpg --guess gzip -c large.iso > large.iso.gz
 For `cp`, the percentage tracks how much of `large.iso` the command has read.
 For `tar`, it tracks the input archive. The `gzip` example writes the compressed
 output to `large.iso.gz` and leaves the input file in place.
-
-The estimate applies to that file, not to the command's total progress. The
-percentage can decrease if files change. A value of 100% does not mean the
-command has finished.
-
-`zpg` cannot measure some read methods. If it cannot find a suitable input,
-the display shows `I/O estimate (unknown)`. On macOS, the estimate always shows
-unknown progress.
 
 ### Command output and exit status
 

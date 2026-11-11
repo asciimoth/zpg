@@ -39,7 +39,7 @@ pub const usage =
     \\                              Progress terminal (default: auto, prefer stderr)
     \\  --test                      Log raw progress snapshots and protocol errors
     \\  --test-output FILE          Save test log to FILE (default: stderr)
-    \\  --guess                     Estimate file I/O progress (Linux)
+    \\  --guess                     Estimate input progress and activity (Linux)
     \\  --report COMPLETED TOTAL    Set parent progress counts (0 total: unknown)
     \\  --                        End options before a command starting with '-'
     \\

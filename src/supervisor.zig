@@ -65,7 +65,7 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
         const estimate = if (o.guess) root.start(guess.unknown_name, 0) else std.Progress.Node.none;
         defer estimate.end();
         var estimator: ?std.Io.Future(void) = if (estimate.index != .none)
-            try io.concurrent(guess.run, .{ io, pid, estimate })
+            io.concurrent(guess.run, .{ io, pid, estimate }) catch null
         else
             null;
         defer if (estimator) |*task| task.cancel(io);

@@ -141,6 +141,13 @@
                 just
                 nixfmt
                 strace
+                coreutils
+                gnutar
+                gzip
+                rsync
+                curl
+                git
+                ffmpeg
                 gh
                 ghrepo.packages.${system}.ghrepo
 

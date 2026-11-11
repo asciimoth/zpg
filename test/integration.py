@@ -19,6 +19,7 @@ from fixture_sync import FixtureSync
 exe = str(pathlib.Path(sys.argv[1]).resolve())
 render_probe = str(pathlib.Path(sys.argv[2]).resolve())
 fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'worker.py')
+guess_fixture = str(pathlib.Path(__file__).parent / 'fixtures' / 'guess_worker.py')
 report_demo = str(pathlib.Path(__file__).parent.parent / 'examples' / 'report-demo.sh')
 env = dict(os.environ, PATH=str(pathlib.Path(exe).parent) + os.pathsep + os.environ['PATH'])
 env.pop('UNICODE_PROGRESS_BAR', None)
@@ -534,6 +535,90 @@ if sys.platform.startswith('linux'):
                                                               ('closed', rb'I/O estimate \(unknown\)')])
             assert 'line??[2Jé.bin'.encode() in capture, capture
             assert b'\x1b[2J' not in capture, capture
+        second = pathlib.Path(directory) / 'second.bin'
+        second.write_bytes(b'x' * 2048)
+        idle = pathlib.Path(directory) / 'idle.bin'
+        with idle.open('wb') as sparse:
+            sparse.truncate(1 << 30)
+        for renderer, prefix in [('bars', []), ('tree', []), ('bars', [exe])]:
+            first = (rb'bytes: input.bin.*25% 256/1024.*bytes: second.bin.*50% 1024/2048'
+                     if renderer == 'bars' else
+                     rb'\[256/1024\] bytes: input.bin.*\[1024/2048\] bytes: second.bin')
+            advance = (rb'bytes: input.bin.*50% 512/1024.*bytes: second.bin.*75% 1536/2048'
+                       if renderer == 'bars' else
+                       rb'\[512/1024\] bytes: input.bin.*\[1536/2048\] bytes: second.bin')
+            capture = terminal_capture(
+                ['--renderer', renderer, *prefix, '--guess', sys.executable,
+                 guess_fixture, 'parallel', str(source), str(second), str(idle)],
+                cols=160, rows=16,
+                checkpoints=[('open', rb'I/O estimate \(unknown\)'),
+                             ('parallel', first), ('advance', advance),
+                             ('single', rb'I/O estimate \(bytes\): second.bin'),
+                             ('parallel-again', rb'2 active inputs(?=.*bytes: input.bin)(?=.*bytes: second.bin)'),
+                             ('closed', rb'I/O estimate \(unknown\)')])
+            frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)
+            parallel_frames = [frame for frame in frames if re.search(first, frame, re.S)]
+            assert parallel_frames, capture
+            for frame in parallel_frames:
+                assert frame.count(b'bytes: input.bin') == 1, frame
+                assert frame.count(b'bytes: second.bin') == 1, frame
+                assert re.search('├─ .*bytes: input.bin'.encode(), frame), frame
+                heading = next(line for line in frame.splitlines() if b'2 active inputs' in line)
+                assert b'%' not in heading and b' done' not in heading, heading
+            compact = [frame for frame in frames if b'I/O estimate (bytes): second.bin' in frame
+                       and b'2 active inputs' not in frame]
+            assert any(b'bytes: input.bin' not in frame and b'bytes: second.bin' not in frame
+                       for frame in compact), capture
+            assert b'idle.bin' not in capture, capture
+            assert output_without_overlay(capture) == b'', capture
+        many = [pathlib.Path(directory) / f'part-{index:02}.bin' for index in range(40)]
+        for path in many:
+            path.write_bytes(b'x' * 1024)
+        capture = terminal_capture(
+            ['--guess', sys.executable, guess_fixture, 'many', *map(str, many)],
+            cols=120, rows=48, checkpoints=[('open', rb'I/O estimate \(unknown\)'),
+                                           ('many', rb'40 active inputs; showing 32')])
+        frames = re.findall(rb'\x1b\[\?2026h(.*?)\x1b\[\?2026l', capture, re.S)
+        assert any(frame.count(b'bytes: part-') == 32 for frame in frames), capture
+        for mode in ('backward', 'growing', 'eof'):
+            source.write_bytes(b'x' * 1024)
+            capture = terminal_capture(
+                ['--guess', sys.executable, guess_fixture, mode, str(source)],
+                cols=160, checkpoints=[('open', rb'I/O estimate \(unknown\)'),
+                                       ('read', rb'25% 256/1024'),
+                                       ('unknown', rb'I/O estimate \(unknown\)')])
+            last_read = capture.rfind(b'25% 256/1024')
+            assert b'I/O estimate (unknown)' in capture[last_read:], capture
+        source.write_bytes(b'x' * 1024)
+        capture = terminal_capture(
+            ['--guess', sys.executable, guess_fixture, 'pread', str(source)],
+            cols=160, checkpoints=[('open', rb'I/O estimate \(unknown\)'),
+                                   ('activity', rb'Activity: read [1-9][0-9]*(\.[0-9])? (B|KiB|MiB)/s')])
+        assert b'%' not in capture, capture
+        capture = terminal_capture(
+            ['--guess', sys.executable, guess_fixture, 'cpu'], cols=160,
+            checkpoints=[('activity', rb'CPU active')])
+        assert b'%' not in capture, capture
+        # A kernel may disable SOCK_DIAG. The fallback must still work there;
+        # exercise real TCP counters when the metadata interface is available.
+        import socket
+        try:
+            with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 4) as probe:
+                probe.settimeout(1)
+                request = struct.pack('=BBBBI', socket.AF_INET, socket.IPPROTO_TCP,
+                                      2, 0, 0xffffffff) + bytes(48)
+                probe.send(struct.pack('=IHHII', 72, 20, 0x301, 1, 0) + request)
+                reply = probe.recv(32768)
+                tcp_supported = len(reply) >= 16 and struct.unpack_from('=H', reply, 4)[0] != 2
+        except OSError:
+            tcp_supported = False
+        if tcp_supported:
+            capture = terminal_capture(
+                ['--guess', sys.executable, guess_fixture, 'tcp'], cols=160,
+                checkpoints=[('connected', rb'TCP observed(?: \(partial\))?: 0 B in, 0 B out'),
+                             ('transferred', rb'TCP observed(?: \(partial\))?: 32 KiB in, 32 KiB out')])
+            assert b'%' not in capture, capture
+            assert output_without_overlay(capture) == b'', capture
         # Sparse files exercise >4 GiB counts without substantial disk use.
         with source.open('wb') as sparse:
             sparse.truncate(1 << 34)
