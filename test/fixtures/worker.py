@@ -140,10 +140,21 @@ elif mode == 'test-progress':
             + bytes(parent for completed, total, name, parent in nodes))
     kind = sys.argv[2]
     data = packet([(0, 4, b'work', 255), (1, 0, b'child\n\x1b', 0)])
-    if kind == 'invalid':
+    if kind in ('invalid', 'invalid-exit'):
         data = data[:-1] + b'\x01'
     elif kind == 'truncated':
         data = data[:-3]
+    elif kind in ('maximum', 'reserved-254', 'reserved-255'):
+        count = 253 if kind == 'maximum' else int(kind.split('-')[1])
+        data = packet([(0, 4, b'root', 255)] +
+                      [(0xffffffff, 0xfffffffe, b'x' * 120, i - 1)
+                       for i in range(1, count)])
+    elif kind == 'reserved-total':
+        data = packet([(0, 0xffffffff, b'root', 255)])
+    elif kind == 'bad-root':
+        data = packet([(0, 4, b'root', 0)])
+    elif kind == 'orphan':
+        data = packet([(0, 4, b'root', 255), (0, 4, b'orphan', 253)])
     os.write(fd, data[:7])
     os.write(fd, data[7:])
     if kind == 'valid':
@@ -152,6 +163,8 @@ elif mode == 'test-progress':
         os.write(fd, b'\x00')
     os.write(1, b'child stdout\x00')
     os.write(2, b'child stderr\n')
+    if kind == 'invalid-exit':
+        sys.exit(37)
 elif mode == 'controls':
     import struct
     fd = int(sys.argv[2])

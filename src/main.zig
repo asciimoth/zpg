@@ -29,7 +29,7 @@ fn run(init: std.process.Init) !u8 {
     if (o.mock) return @import("mock.zig").run(init.io, init.arena.allocator(), init.minimal.environ, o);
     if (o.tasks_file) |path| {
         const config = @import("tasks.zig").load(init.io, init.arena.allocator(), path, o.argv) catch |err| {
-            try output.print(init.io, "zpg: tasks file {s}: {s}\n", .{ path, @errorName(err) });
+            try output.print(init.io, "zpg: tasks file \"{f}\": {s}\n", .{ @import("diagnostic.zig").escaped(path), @errorName(err) });
             return 2;
         };
         return @import("tasks_runner.zig").run(init.io, init.arena.allocator(), init.minimal.environ, o, config);

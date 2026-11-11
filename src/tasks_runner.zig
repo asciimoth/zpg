@@ -82,13 +82,17 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     defer for (jobs) |*job| job.close(io);
     errdefer for (jobs) |*job| job.stop(.KILL);
 
+    var started: usize = 0;
     for (config.tasks, jobs, 0..) |task, *job, index| {
+        // Launching many tasks can take time. Stop creating processes as soon
+        // as shutdown is requested, then use the normal group shutdown below.
+        if (signals.get() != 0 or failed.load(.acquire)) break;
         job.node = tree.start(task.name orelse std.fs.path.basename(task.command[0]), 0);
         // Keep estimates beside the IPC node: ending a local child of an IPC
         // node would change the pipe index stored in its completed count.
         job.command_node = job.node.start("command", 0);
         job.child = child_process.spawn(io, environ, task.command, job.command_node) catch |err| {
-            try output.print(io, "zpg: task {d} ({s}): {s}\n", .{ index + 1, task.name orelse task.command[0], @errorName(err) });
+            try output.print(io, "zpg: task {d} (\"{f}\"): {s}\n", .{ index + 1, @import("diagnostic.zig").escaped(task.name orelse task.command[0]), @errorName(err) });
             return err;
         };
         job.pid = job.child.?.id.?;
@@ -104,9 +108,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
             if (job.estimate.index != .none)
                 job.estimator = io.concurrent(guess.run, .{ io, job.pid.?, job.estimate }) catch null;
         }
+        started += 1;
     }
 
-    var remaining = jobs.len;
+    const active = jobs[0..started];
+    var remaining = active.len;
     var shutdown: process_wait.Shutdown = .{};
     while (remaining != 0) {
         const requested = signals.get() != 0 or failed.load(.acquire) or
@@ -114,7 +120,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
         if (shutdown.next_signal(std.Io.Clock.awake.now(io), requested)) |sig| {
             for (jobs) |*job| job.stop(sig);
         }
-        for (jobs) |*job| {
+        for (active) |*job| {
             if (job.code != null or !job.exited.load(.acquire)) continue;
             const term = try job.waiter.?.await(io);
             job.waiter = null;
@@ -131,7 +137,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     // A group leader can exit before its descendants. Do not leave those
     // descendants running when tasks were stopped by a signal or finish rule.
     if (shutdown.started or config.stop_on_first_finish) for (jobs) |*job| job.stop(.KILL);
-    const truncated = !try process_wait.wait_for_drain(io, &done, @intCast(jobs.len * 2));
+    const truncated = !try process_wait.wait_for_drain(io, &done, @intCast(active.len * 2));
     // An interrupt can also arrive while descendants keep the pipes open.
     if (signals.get() != 0 or failed.load(.acquire)) for (jobs) |*job| job.stop(.KILL);
     for (jobs) |*job| {
@@ -147,6 +153,6 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, environ: std.process.Enviro
     if (signals.get() != 0) return @intCast(128 + signals.get());
     if (config.stop_on_first_finish) return jobs[first.load(.acquire)].code.?;
     // File order makes the result stable when several tasks fail together.
-    for (jobs) |job| if (job.code.? != 0) return job.code.?;
+    for (active) |job| if (job.code.? != 0) return job.code.?;
     return 0;
 }

@@ -83,7 +83,7 @@ pub const Log = struct {
                 if (changed) {
                     const name = std.mem.sliceTo(record[8..], 0);
                     // Escape arbitrary bytes so labels cannot inject terminal controls or log lines.
-                    try self.print(io, "node={d} parent={d} completed={d} total={d} name=\"{f}\"", .{ i, parent, completed, total, std.zig.fmtString(name) });
+                    try self.print(io, "node={d} parent={d} completed={d} total={d} name=\"{f}\"", .{ i, parent, completed, total, @import("diagnostic.zig").escaped(name) });
                 }
             }
             @memcpy(previous[0..len], packet[0..len]);

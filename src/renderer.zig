@@ -365,6 +365,53 @@ test "invalid packets and detached cycles cannot escape the tree" {
     try std.testing.expectEqual(@as(usize, 1), try render(&writer, snapshot, 80, 24, 0, .{}));
 }
 
+test "arbitrary progress records stay printable and within terminal bounds" {
+    var prng = std.Random.DefaultPrng.init(0x7a70672d77697265);
+    const random = prng.random();
+    var packet: [33000]u8 = undefined;
+    var buffer: [131072]u8 = undefined;
+    for (0..256) |count| {
+        const bytes = packet[0..packetSize(@intCast(count))];
+        random.bytes(bytes);
+        bytes[0] = @intCast(count);
+        if (count == 0 or count >= 254) {
+            try std.testing.expectError(error.InvalidProgressPacket, Snapshot.init(bytes));
+            continue;
+        }
+        const parents = bytes[1 + count * record_size ..];
+        parents[0] = no_parent;
+        // Include deep chains, wide trees, cycles, and detached nodes.
+        for (1..count) |index| {
+            if (count % 3 == 0) parents[index] = @intCast(index - 1);
+            if (count % 3 == 1) parents[index] = 0;
+        }
+        const snapshot = try Snapshot.init(bytes);
+        for ([_]cli.Renderer{ .bars, .tree }) |mode| {
+            for ([_]usize{ 0, 1, 2, 9, 80, 65535 }) |cols| {
+                var writer = std.Io.Writer.fixed(&buffer);
+                const rows: usize = if (cols == 65535) 65535 else 25;
+                const lines = try renderMode(&writer, snapshot, cols, rows, 0, .{}, mode);
+                try std.testing.expect(lines <= @min(rows - 2, count));
+                const frame = writer.buffered();
+                try std.testing.expect(std.unicode.utf8ValidateSlice(frame));
+                if (lines == 0) {
+                    try std.testing.expectEqual(@as(usize, 0), frame.len);
+                    continue;
+                }
+                var rendered = std.mem.splitSequence(u8, frame, "\r\n");
+                var actual_lines: usize = 0;
+                while (rendered.next()) |line| {
+                    actual_lines += 1;
+                    try std.testing.expect(styles.text_width(line) <= @min(cols -| 1, 512));
+                    var chars = std.unicode.Utf8View.initUnchecked(line).iterator();
+                    while (chars.nextCodepoint()) |cp| try std.testing.expect(styles.safe_codepoint(cp));
+                }
+                try std.testing.expectEqual(lines, actual_lines);
+            }
+        }
+    }
+}
+
 test "Unicode names remain whole and invalid bytes are replaced" {
     var buffer: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);

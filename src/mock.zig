@@ -188,13 +188,21 @@ fn emitInputLine(io: std.Io, line: []const u8, node: std.Progress.Node) !void {
 }
 
 fn processInputChunk(io: std.Io, allocator: std.mem.Allocator, pending: *std.ArrayList(u8), bytes: []const u8, node: std.Progress.Node) !void {
+    const max_pending = 64 * 1024;
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const end = if (std.mem.indexOfScalarPos(u8, bytes, offset, '\n')) |index| index + 1 else bytes.len;
+        const limit = offset + @min(bytes.len - offset, max_pending - pending.items.len);
+        const end = if (std.mem.indexOfScalarPos(u8, bytes[0..limit], offset, '\n')) |index| index + 1 else limit;
         try pending.appendSlice(allocator, bytes[offset..end]);
         if (bytes[end - 1] == '\n') {
             try emitInputLine(io, pending.items, node);
             pending.clearRetainingCapacity();
+        } else if (pending.items.len == max_pending) {
+            // Stream long lines without unlimited allocation. Retain one byte
+            // so EOF still completes and delays the final unterminated line.
+            try output.writeStdout(io, pending.items[0 .. max_pending - 1]);
+            pending.items[0] = pending.items[max_pending - 1];
+            pending.shrinkRetainingCapacity(1);
         }
         offset = end;
     }

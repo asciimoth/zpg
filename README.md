@@ -89,8 +89,9 @@ zpg zpg --mock
 
 `--mock` runs a fixed progress workload when stdin is empty. It sends progress
 data to a parent `zpg` process and does not draw a progress display itself.
-With input from a pipe or file, it echoes each line after a short delay. The
-demo preserves a final line without a newline:
+With input from a pipe or file, it echoes each line with a short delay. Long
+lines stream in chunks to keep memory use bounded. The demo preserves a final
+line without a newline:
 
 ```sh
 printf 'one\ntwo\n' | zpg zpg --mock
@@ -126,8 +127,7 @@ substitution values, including arguments that start with `-`.
 ```
 
 Run this file with `zpg --tasks tasks.json source-dir backup-dir`.
-The [JSON schema](tasks.schema.json) defines the format. A file must contain
-at least one task and must not exceed 1 MiB. Unknown fields are errors.
+The [JSON schema](tasks.schema.json) defines the format.
 
 Each `command` is an array with the executable and its arguments. zpg uses
 `PATH` to find the executable. Tasks inherit the current directory and
@@ -147,11 +147,15 @@ start at 1 and must not have leading zeroes. A missing value or malformed
 There is no implicit shell. For shell syntax, use an explicit command such
 as `["sh", "-c", "cp -- \"$1\" \"$2\"", "copy", "{{.1}}", "{{.2}}"]`.
 Pass substituted values as separate arguments to keep them out of shell code.
+Only run tasks files whose commands you trust. A tasks file can run any command
+with your permissions; argument validation does not restrict those commands.
 
 All task stdout goes to zpg stdout. All task stderr goes to zpg stderr.
 Bytes and order within each task's stream stay unchanged; output from different
 tasks can interleave. Tasks share inherited stdin when it is a file or pipe;
 input is not copied to each task. Terminal stdin is empty, as in command mode.
+Task errors quote file names, task names, and command names. Control characters,
+Unicode direction controls, and invalid UTF-8 bytes are escaped.
 
 By default, zpg waits for every task. It returns zero if all tasks succeed,
 or the first nonzero status in file order. Set `stop_on_first_finish: true`
@@ -161,6 +165,8 @@ the first observed exit wins. Signals return `128 + signal`. On Ctrl-C,
 SIGTERM, or an output failure, zpg stops all task groups. Shutdown uses SIGTERM
 and forces remaining processes to stop after two seconds. A launch failure
 stops tasks that already started and returns 1. Invalid tasks files return 2.
+If a signal or output failure occurs during launch, zpg stops launching tasks
+and shuts down the tasks that have started.
 
 ### Progress display
 

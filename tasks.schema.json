@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "zpg tasks file",
-  "description": "Run with zpg [options] --tasks FILE.json [values...]. All tasks start in parallel in the current working directory and inherit the environment. Files must be at most 1 MiB. Unknown properties are errors.",
+  "description": "Run with zpg [options] --tasks FILE.json [values...]. All tasks start in parallel in the current working directory and inherit the environment. Only run commands you trust. Files must be at most 1 MiB. All expanded command arguments together must be at most 8 MiB, including one terminating NUL byte per argument; the operating system can impose lower limits per command. Unknown properties are errors.",
   "type": "object",
   "additionalProperties": false,
   "required": ["tasks"],

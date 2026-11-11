@@ -298,6 +298,30 @@ assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
 p = subprocess.run([exe, 'zpg', '--mock'], input=mock_input,
                    capture_output=True, env=env, timeout=5)
 assert (p.returncode, p.stdout, p.stderr) == (0, mock_input, b'')
+# A long line must start streaming before newline or EOF, with bounded buffering.
+# Writing exactly the buffer limit cannot block on output before all input is read.
+long_line = b'x' * (64 * 1024)
+p = subprocess.Popen([exe, '--mock'], stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+try:
+    p.stdin.write(long_line)
+    p.stdin.flush()
+    ready, _, _ = select.select([p.stdout], [], [], 5)
+    assert ready, 'long mock input line was buffered until EOF'
+    first = os.read(p.stdout.fileno(), 4096)
+    assert first and first == long_line[:len(first)]
+    p.stdin.close()
+    p.stdin = None
+    rest, errors = p.communicate(timeout=5)
+    assert (p.returncode, first + rest, errors) == (0, long_line, b'')
+finally:
+    if p.poll() is None:
+        p.kill()
+        p.wait()
+    if p.stdin is not None:
+        p.stdin.close()
+    p.stdout.close()
+    p.stderr.close()
 # Ctrl-C must stop a mock even when its input pipe remains open and idle.
 for initial in (b'first\n', b'first\npartial'):
     p = subprocess.Popen([exe, '--mock'], stdin=subprocess.PIPE,
@@ -1081,7 +1105,9 @@ visible_logs = [line for line in replay_terminal(capture, 8, 80) if line]
 assert visible_logs == expected_logs.decode().splitlines(), visible_logs
 
 # Test mode reads raw packets even with redirected output and fast child exits.
-for kind, code in [('valid', 0), ('invalid', 1), ('truncated', 1)]:
+for kind, code in [('valid', 0), ('maximum', 0), ('invalid', 1), ('truncated', 1),
+                   ('reserved-254', 1), ('reserved-255', 1), ('reserved-total', 1),
+                   ('bad-root', 1), ('orphan', 1), ('invalid-exit', 37)]:
     with tempfile.TemporaryDirectory() as directory:
         path = pathlib.Path(directory) / 'progress.log'
         p = capture_output('--test', '--test-output', str(path),
@@ -1090,10 +1116,14 @@ for kind, code in [('valid', 0), ('invalid', 1), ('truncated', 1)]:
         assert p.stderr == b'child stderr\n', p.stderr
         log = path.read_bytes()
         assert b'progress pipe opened' in log, log
-        if kind == 'valid':
-            assert b'snapshot=2 nodes=2 unchanged' in log, log
-            assert b'completed=4 total=4' in log, log
-            assert b'nodes=0 changed' in log, log
+        if code == 0:
+            if kind == 'valid':
+                assert b'snapshot=2 nodes=2 unchanged' in log, log
+                assert b'completed=4 total=4' in log, log
+                assert b'nodes=0 changed' in log, log
+            else:
+                assert b'nodes=253 changed' in log, log
+                assert b'node=252 parent=251 completed=4294967295 total=4294967294' in log, log
             assert b'\x1b' not in log, log
             assert b'protocol=no errors detected' in log, log
         else:
@@ -1103,6 +1133,11 @@ assert b'no progress received' in p.stderr, p.stderr
 assert b'process result=' in p.stderr, p.stderr
 p = capture_output('--test', 'sh', '-c', 'zpg --report 3 4 --name work')
 assert b'completed=3 total=4 name="work"' in p.stderr, p.stderr
+# Labels in diagnostic logs cannot insert terminal or Unicode direction controls.
+unsafe_label = 'label\x1b[2J\n\u009b\u202e\u2066'
+p = capture_output('--test', exe, '--report', '1', '2', '--name', unsafe_label)
+assert b'label\\x1b[2J\\n\\xc2\\x9b\\xe2\\x80\\xae\\xe2\\x81\\xa6' in p.stderr, p.stderr
+assert b'\x1b' not in p.stderr and '\u202e'.encode() not in p.stderr, p.stderr
 # Raw-pipe spawning must preserve PATH search, launch errors, and process groups.
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)
@@ -1211,6 +1246,37 @@ with tempfile.TemporaryDirectory() as directory:
         tasks_path.write_text(invalid)
         capture_output('--tasks', str(tasks_path), code=2)
     capture_output('--tasks', str(root / 'missing.json'), code=2)
+
+    # Expansion limits apply to the whole file, before any task starts.
+    # Each argument and task is small; their combined expanded size is not.
+    expanded_task = dict(command=['true', *(['{{.1}}'] * 65)])
+    task_file([valid_task, expanded_task, expanded_task])
+    p = capture_output('--tasks', str(tasks_path), 'x' * 65536, code=2)
+    assert b'TaskArgumentsTooLarge' in p.stderr and not marker.exists(), p.stderr
+    task_file([valid_task, dict(command=['true', '{{.1}}' * 129])])
+    p = capture_output('--tasks', str(tasks_path), 'x' * 65536, code=2)
+    assert b'TaskArgumentsTooLarge' in p.stderr and not marker.exists(), p.stderr
+
+    # Error paths quote untrusted file names, task labels, and executable names.
+    hostile_name = 'missing\x1b[2J\n\u009b\u202e'
+    escaped_name = b'missing\\x1b[2J\\n\\xc2\\x9b\\xe2\\x80\\xae'
+    p = capture_output('--tasks', str(root / hostile_name), code=2)
+    assert escaped_name in p.stderr and p.stderr.count(b'\n') == 1, p.stderr
+    for task in [dict(name=hostile_name, command=['zpg-command-that-does-not-exist']),
+                 dict(command=[str(root / hostile_name)])]:
+        task_file([task])
+        p = capture_output('--tasks', str(tasks_path), code=1)
+        assert escaped_name in p.stderr and b'\x1b' not in p.stderr, p.stderr
+        assert p.stderr.count(b'\n') == 2, p.stderr
+
+    # Signals during launch must prevent later tasks from starting. The first
+    # shell sends the signal while zpg is still creating the remaining jobs.
+    for sig in ('INT', 'TERM'):
+        task_file([dict(command=['sh', '-c', f'kill -{sig} "$PPID"'])] +
+                  [dict(command=['true']) for _ in range(30)] + [valid_task])
+        p = capture_output('--tasks', str(tasks_path), code=130 if sig == 'INT' else 143)
+        assert not marker.exists(), ('task started after interrupt', sig, p.stderr)
+        assert b'drain timeout' not in p.stderr, p.stderr
 
     # First-finish returns the winner's status, including success, and forces
     # both remaining groups to exit when they ignore SIGTERM.
