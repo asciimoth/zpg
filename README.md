@@ -109,6 +109,19 @@ Use `zpg [options] <command> [args...]`. Put `zpg` options before the command.
 command name starts with a hyphen, put `--` before the name. Run `zpg --help`
 for all options.
 
+### Compatible programs
+
+These programs support the Zig progress protocol. Run them with `zpg` to show
+their progress.
+
+[aaa](https://github.com/asciimoth/aaa):
+
+![zpg showing aaa progress](https://vhs.charm.sh/vhs-4GyOGbY0ZfwJSCgBOOyNZr.gif)
+
+[ghrepo](https://github.com/asciimoth/ghrepo):
+
+![zpg showing ghrepo progress](https://vhs.charm.sh/vhs-7vs50rgsHaHSEMa6S8cXcI.gif)
+
 ### Parallel tasks
 
 Use `zpg [options] --tasks FILE.json [values...]` to run tasks in parallel.
