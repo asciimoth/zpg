@@ -38,6 +38,9 @@ pub fn run(io: std.Io, environ: std.process.Environ, o: cli.Options) !u8 {
             write_open = false;
         }
         const pid = child.id.?;
+        // Setup can fail after spawn (for example, when starting an I/O task).
+        // Child.kill only stops the leader; also stop its process group.
+        errdefer std.posix.kill(-pid, .KILL) catch {};
         const stdout = child.stdout.?;
         child.stdout = null;
         defer stdout.close(io);
